@@ -1,278 +1,264 @@
-# ClaimIQ — Swagger UI Testing Guide (PostgreSQL in Docker)
+# ClaimIQ — Step-by-Step Local Setup and Swagger Testing
 
-This guide walks through testing the ClaimIQ API in Swagger UI in a practical order: start PostgreSQL, start FastAPI, log in, create a policy, log in as a customer, create a claim, process the claim, and inspect the saved data in PostgreSQL.
+This guide is written for someone who has not run the project before. Follow the steps in order. It covers PostgreSQL from Docker Hub, Python setup, starting the API, testing the claim workflow, uploading a policy document, processing it for RAG, and asking a policy question.
 
-> Run all commands from the ClaimIQ repository root — the directory containing `requirements.txt`, `alembic.ini`, and the `app` folder. These are local development/demo steps; do not use the demo accounts or sample data in production.
+> **Important:** Run PowerShell commands from the project root — the folder containing `requirements.txt`, `app`, `dashboard`, `scripts`, and `tests`. This guide does not change application logic. It is for local demonstration only.
 
-## 1. Start PostgreSQL from Docker Hub
+## What you need
 
-Make sure Docker Desktop is running. This guide uses the official PostgreSQL image with Alpine Linux and maps host port **5433** to container port **5432**. Port 5433 helps avoid conflicts with a PostgreSQL instance already running on your computer.
+- Windows with Docker Desktop installed and running.
+- Python 3.12 (recommended for this project) and PowerShell.
+- The ClaimIQ project ZIP extracted to a normal folder.
+- Access/configuration for the Azure services used by RAG: Azure Blob Storage, Azure AI Search, and Azure OpenAI.
+- A PDF or DOCX policy file for the RAG demo.
 
-### 1.1 Pull the image
+## 1. Open the project folder
 
-Open PowerShell or a terminal and run:
+Extract the ZIP. Open PowerShell and change to the extracted project directory. Example (replace the path if you extracted it somewhere else):
+
+```powershell
+cd "C:\Users\<your-user>\Desktop\claimq"
+```
+
+Confirm you are in the right folder:
+
+```powershell
+Get-ChildItem
+```
+
+You should see `requirements.txt`, `app`, `dashboard`, `scripts`, and `tests`.
+
+## 2. Pull PostgreSQL from Docker Hub
+
+Make sure Docker Desktop is open. In PowerShell, run:
 
 ```powershell
 docker pull postgres:17-alpine
 ```
 
-### 1.2 Create and start the PostgreSQL container
+This downloads PostgreSQL 17 with Alpine Linux. Alpine is a small Linux base image used to keep the image relatively lightweight.
 
-The following creates a database named `claimiq`, an application user named `claimiq_local`, and persistent storage for the database files. Replace the example password with a local development password of your choice.
+## 3. Create and start the PostgreSQL container
+
+The following commands create a Docker volume for persistent database files and start PostgreSQL with a database named `claimiq`. They publish port 5433 on your Windows computer and forward it to port 5432 inside the container.
+
+Use a local demo password and keep it consistent with the `DATABASE_URL` in Step 5.
 
 ```powershell
 docker volume create claimiq_pgdata
-
-docker run --name claimiq-postgres `
-  --detach `
-  --restart unless-stopped `
-  --publish 5433:5432 `
-  --env POSTGRES_DB=claimiq `
-  --env POSTGRES_USER=claimiq_local `
-  --env POSTGRES_PASSWORD=ClaimIQ_Local_ChangeMe_123 `
-  --volume claimiq_pgdata:/var/lib/postgresql/data `
-  postgres:17-alpine
+docker run --name claimiq-postgres --detach --restart unless-stopped --publish 5433:5432 --env POSTGRES_DB=claimiq --env POSTGRES_USER=claimiq_local --env POSTGRES_PASSWORD=ClaimIQLocal123 --volume claimiq_pgdata:/var/lib/postgresql/data postgres:17-alpine
 ```
 
-The password above is only an example. Use the same password in the application connection string below. Do not commit passwords to Git.
-
-### 1.3 Confirm that PostgreSQL is running
-
-```powershell
-docker ps
-docker logs claimiq-postgres
-docker exec -it claimiq-postgres pg_isready -U claimiq_local -d claimiq
-```
-
-The last command should report that PostgreSQL is accepting connections.
-
-If you already created a container named `claimiq-postgres`, do not run `docker run` again. Start the existing container instead:
+If Docker says a container named `claimiq-postgres` already exists, do not run `docker run` again. Start the existing container:
 
 ```powershell
 docker start claimiq-postgres
 ```
 
-## 2. Configure the FastAPI application to use the Docker database
-
-Open a **new PowerShell terminal** in the ClaimIQ repository root. The application runs on your computer, so its database host is `127.0.0.1` and its mapped port is `5433` — not the Docker container's internal port `5432`.
-
-Set the database URL and a local JWT signing secret in that same terminal:
+Check that it is running and ready:
 
 ```powershell
-$env:DATABASE_URL = 'postgresql+psycopg2://claimiq_local:ClaimIQ_Local_ChangeMe_123@127.0.0.1:5433/claimiq'
-$env:JWT_SECRET = 'replace-this-with-a-long-random-local-secret'
+docker ps
+docker exec -it claimiq-postgres pg_isready -U claimiq_local -d claimiq
 ```
 
-If you changed the password in Step 1.2, update it here too. If your password contains characters such as `@`, `:`, `/`, or `#`, URL-encode those characters or use the project's existing connection-URL configuration method.
+Expected: `accepting connections`.
 
-Check that Python can connect to the intended database:
+### If port 5433 is already in use
+
+Choose another free host port (for example, 5434) in the `--publish` argument and use that same port in `DATABASE_URL` in Step 5.
+
+## 4. Create and activate a Python virtual environment
+
+In PowerShell, from the project root:
 
 ```powershell
-python -c "from sqlalchemy import text; from app.db import engine; c=engine.connect(); print(c.execute(text('select current_database(), current_user')).one()); c.close()"
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-Expected result should identify database `claimiq` and user `claimiq_local`. If this command fails, fix the database connection before continuing.
-
-> Use the Python executable from your project's virtual environment if you created one. For example, on Windows you may use `\.venv64\Scripts\python.exe` instead of `python` in the commands below.
-
-## 3. Create the database tables and demo users
-
-Run database migrations first, then seed the demo accounts:
+If PowerShell blocks activation, run this in the same PowerShell window, then activate again:
 
 ```powershell
-python -m alembic upgrade head
-python -m alembic current
-python -m app.seed
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
 ```
 
-To list the tables created by the migration:
+If `py -3.12` is not available, install Python 3.12 or use the installed Python version supported by the dependencies. Keep the virtual environment activated for the remaining commands.
+
+## 5. Configure the `.env` file
+
+The `.env` file tells ClaimIQ which database and Azure services to use.
+
+1. If `.env` already exists, make a backup and edit it; do not overwrite working Azure settings.
+2. If `.env` does not exist, copy the template:
 
 ```powershell
-python -c "from sqlalchemy import inspect; from app.db import engine; print('\n'.join(inspect(engine).get_table_names()))"
+Copy-Item .env.example .env
 ```
 
-If the migration fails, do not continue to the Swagger tests until it succeeds. If the project version uses a different database module path, follow the import path in the existing project README; the main requirement is that Alembic and FastAPI use the same `DATABASE_URL`.
-
-## 4. Start the API
-
-In the same PowerShell terminal where you set `DATABASE_URL` and `JWT_SECRET`, run:
+3. Open `.env` in Notepad:
 
 ```powershell
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+notepad .env
 ```
 
-Leave this terminal open. Open Swagger UI in your browser:
+Set the database values to match Step 3. For the commands above, the local database entries should be:
+
+```env
+DATABASE_URL=postgresql+psycopg2://claimiq_local:ClaimIQLocal123@127.0.0.1:5433/claimiq
+JWT_SECRET=replace-with-a-long-random-local-secret
+ACCESS_TOKEN_MINUTES=120
+```
+
+Do not paste the example JWT secret into a production deployment. If your database password contains URL-special characters such as `@`, `:`, `/`, or `#`, URL-encode them in `DATABASE_URL`.
+
+### Azure settings needed for RAG
+
+Fill these values with the actual endpoints, deployment names, and credentials from your Azure resources. Do not leave the placeholder text from `.env.example`.
+
+```env
+AZURE_STORAGE_ACCOUNT_NAME=your-storage-account-name
+AZURE_STORAGE_CONTAINER=policy-documents
+AZURE_STORAGE_CONNECTION_STRING=your-storage-connection-string
+AZURE_SEARCH_ENDPOINT=https://your-search-service.search.windows.net
+AZURE_SEARCH_INDEX_NAME=policy-chunks
+AZURE_SEARCH_API_KEY=your-search-admin-key
+AZURE_OPENAI_ENDPOINT=https://your-openai-resource.openai.azure.com/openai/v1/
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=your-embedding-deployment-name
+AZURE_OPENAI_CHAT_DEPLOYMENT=your-chat-deployment-name
+AZURE_OPENAI_API_KEY=your-openai-api-key
+RAG_TOP_K=5
+RAG_MIN_SEARCH_SCORE=0.5
+MAX_DOCUMENT_SIZE_MB=10
+```
+
+Use the exact deployment names configured in your Azure OpenAI resource. The embedding deployment must return vectors compatible with the search index. The app's index setup script calculates the embedding dimension from the configured embedding deployment.
+
+Keep `.env` private. Do not share it or commit it to source control.
+
+## 6. Create the database tables, demo accounts, and Azure AI Search index
+
+Make sure PostgreSQL is running and `.env` is saved. From the project root, run:
+
+```powershell
+python -m app.init_db
+```
+
+This command:
+- creates any missing PostgreSQL tables;
+- inserts demo users, 50 sample policies, and a sample claim if they are not already present;
+- creates or updates the Azure AI Search index named in `.env`.
+
+It does **not** drop the database or re-create all existing records from scratch. If it fails during Azure index creation, check the Azure settings and permissions before proceeding.
+
+## 7. Start the FastAPI backend
+
+In the same PowerShell window, run:
+
+```powershell
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Leave this window open. It is running the API.
+
+Open Swagger UI in your browser:
 
 **http://127.0.0.1:8000/docs**
 
-Other useful URLs:
+If Swagger does not open, check the PowerShell error and make sure port 8000 is not already occupied.
 
-- `http://127.0.0.1:8000/health` — API health response. This alone does not confirm database connectivity.
-- `http://127.0.0.1:8000/openapi.json` — generated API schema.
+## 8. Sign in to Swagger
 
-## 5. Demo accounts
-
-The seed script creates these local demo accounts. All use password `demo123`.
-
-| Username | Password | Role | Main use in this walkthrough |
-|---|---|---|---|
-| `admin` | `demo123` | Admin | Create a policy; inspect users; optional reassignment |
-| `customer` | `demo123` | Customer | Submit a new claim and view their own claim |
-| `reviewer` | `demo123` | Reviewer | Review and decide a claim; view analytics |
-| `adjuster` | `demo123` | Adjuster | View assigned claims, update permitted workflow status, add notes |
-
-The demo users may have generated IDs that differ between databases. Always use IDs returned by the API instead of assuming an ID such as `1`.
-
-## 6. Swagger UI: test the APIs in order
-
-### How to execute an endpoint
-
-For each endpoint below:
-
-1. Expand the endpoint row in Swagger.
-2. Click **Try it out**.
-3. Enter the request body if the endpoint has one.
-4. Click **Execute**.
-5. Check the **Response code** and **Response body**.
-
-For protected endpoints, use the **Authorize** button to sign in. The API's login endpoint uses form fields, not a JSON request body.
-
-### Step 1 — Check API health
-
-- Endpoint: `GET /health`
-- Click **Try it out** → **Execute**.
-- Expected: HTTP `200` with a response similar to `{"status":"ok"}`.
-
-This only checks that the API process is running.
-
-### Step 2 — Log in as admin
-
-Use Swagger's **Authorize** button and enter:
-
-- Username: `admin`
-- Password: `demo123`
-
-Click **Authorize**, then close the dialog. Test `GET /users/me`.
-
-Expected: HTTP `200` and a response showing the current user as `admin` with role `admin`.
-
-You can also test `POST /auth/token` directly. Its request uses form fields:
+In Swagger, expand `POST /auth/token` and click **Try it out**. This endpoint uses form fields, not a JSON request body:
 
 - `username`: `admin`
 - `password`: `demo123`
 
-Expected response includes `access_token` and `token_type: "bearer"`. Do not share the token.
+Click **Execute**. A successful response contains `access_token`.
 
-### Step 3 — List users and find an adjuster ID
+Then click the green **Authorize** button near the top of Swagger. Enter the token as a bearer token if the dialog asks for it. In many Swagger setups, pasting the access token alone is sufficient; do not type the word `Bearer` twice. Click **Authorize**, then close the dialog.
 
-- Endpoint: `GET /users`
-- Stay authorized as `admin`.
+The seed script creates these demo users with password `demo123`:
+
+| Username | Role | Use |
+|---|---|---|
+| `admin` | `admin` | Manage policies/documents, assign claims, analytics and audit |
+| `reviewer` | `reviewer` | Review claims, assign adjusters, approve/deny, analytics |
+| `adjuster` | `adjuster` | Work assigned claims, add notes, ask policy questions |
+| `customer` | `customer` | Submit and view own claims |
+| `customer2` to `customer50` | `customer` | Separate demo customer accounts |
+| `adjuster1` to `adjuster5` | `adjuster` | Additional demo adjusters |
+| `support_agent` | `support_agent` | Read permitted claim/document data and ask policy questions |
+
+To switch roles, log in again using `POST /auth/token`, then use **Authorize** with the new token.
+
+## 9. Test the claims workflow
+
+Swagger is grouped by endpoint tags. Use the live schemas displayed in Swagger; they are the source of truth for required fields.
+
+### 9.1 Check the API
+
+- Expand `GET /health`.
 - Click **Try it out** → **Execute**.
+- Expected: `200` and `{"status":"ok"}`.
 
-Expected: a list of users, including the `adjuster` account. Note the adjuster's `id` if you want to test manual assignment later. This endpoint is intended for admin/reviewer access.
+### 9.2 Check your login and role
 
-### Step 4 — List existing policies
+- Use `GET /users/me` after authorization.
+- Expected: your username and role.
 
-- Endpoint: `GET /policies`
-- Stay authorized as `admin`.
-- Click **Try it out** → **Execute**.
+### 9.3 Find a policy owned by the customer
 
-Review the returned policies. If the policy you want to use already exists and is active, you can use its `id` for the claim test. Otherwise, create a new policy in Step 5.
+- Sign in as `customer`.
+- Expand `GET /policies` and execute it.
+- Find the policy number `POL-0001`. The seed data assigns it to `customer`.
+- Record its numeric `id`. The claim API needs `policy_id`, which is this database ID, not the policy number.
 
-### Step 5 — Create a policy (admin)
+### 9.4 Submit a claim
 
-- Endpoint: `POST /policies`
-- Stay authorized as `admin`.
-- Click **Try it out** and use this sample JSON:
-
-```json
-{
-  "number": "POL-SWAGGER-1001",
-  "holder": "Sample Customer",
-  "active": true
-}
-```
-
-Click **Execute**. Expected: successful creation and a response containing the new policy `id`.
-
-**Record the returned policy ID.** Use that exact number in Step 7. If you execute the request again with the same policy number, the API may return HTTP `409` because policy numbers must be unique. If your Swagger schema shows a different request model, follow the schema displayed by your running application.
-
-### Step 6 — Log in as the customer
-
-Click **Authorize** again and switch the credentials to:
-
-- Username: `customer`
-- Password: `demo123`
-
-Authorize and close the dialog. Run `GET /users/me` and confirm that the current user is `customer`.
-
-You must switch roles for this step because a customer should submit a claim as themselves, rather than as an administrator.
-
-### Step 7 — Create a claim (customer)
-
-- Endpoint: `POST /claims`
 - Stay authorized as `customer`.
-- Click **Try it out** and enter the policy ID returned in Step 5:
+- Expand `POST /claims` → **Try it out**.
+- Enter JSON using the policy ID you just looked up. Example:
 
 ```json
 {
   "policy_id": 1,
-  "description": "Water damage in the kitchen",
-  "amount": 2500
+  "description": "Hospitalization for fever and viral infection, including doctor consultation, diagnostic tests, medicines, and treatment.",
+  "amount": 25000
 }
 ```
 
-Replace `1` with the actual policy ID. Click **Execute**.
+Replace `1` with the actual ID returned by `GET /policies`. Click **Execute**.
 
-Expected: HTTP `201` or another successful response, with fields such as `id`, `policy_id`, `owner_id`, `assigned_to`, `description`, `amount`, and `status`. Record the returned claim `id` for the next steps. The initial status should be `submitted`.
+Expected: `201 Created`, with a claim `id` and status `submitted`. A claim is automatically assigned to an active adjuster. Record the returned claim ID for later steps.
 
-Important rules:
+### 9.5 View the claim
 
-- The policy must exist and be active; otherwise, the API rejects the claim.
-- The current implementation automatically assigns a claim to an active adjuster with the lowest open-claim count. The returned `assigned_to` field identifies that adjuster.
-- If there is no active adjuster, claim creation may fail with a service-unavailable response.
+- Use `GET /claims` as the customer to see claims belonging to that customer.
+- Use `GET /claims/{claim_id}` and replace the path parameter with the claim ID from the response.
+- If the claim is not visible to the customer you logged in as, check that the policy belongs to that customer.
 
-### Step 8 — View the customer's claims
+### 9.6 Assign an adjuster (optional; a claim is already assigned automatically)
 
-- Endpoint: `GET /claims`
-- Stay authorized as `customer`.
-- Click **Try it out** → **Execute**.
-
-Expected: a list containing the claim you just created. Customer access is restricted to that customer's own claims.
-
-### Step 9 — Get the claim by ID
-
-- Endpoint: `GET /claims/{claim_id}`
-- Enter the claim ID returned in Step 7.
-- Click **Execute**.
-
-Expected: HTTP `200` with that claim's details.
-
-### Step 10 — Optional: assign or reassign the claim (admin/reviewer)
-
-Claim creation already assigns an active adjuster automatically. This step is optional and is useful to test the assignment endpoint.
-
-1. Click **Authorize** and sign in as `admin` (or `reviewer`): password `demo123`.
-2. Run `GET /users` and note the ID of an active user whose role is `adjuster`.
-3. Open `POST /claims/{claim_id}/assignment` and enter the claim ID from Step 7.
-4. Use this JSON, replacing `2` with the real adjuster ID:
+- Authorize as `admin` or `reviewer`.
+- Run `GET /users` and find an active user whose role is `adjuster`. Record their numeric user ID.
+- Run `POST /claims/{claim_id}/assignment` with body:
 
 ```json
 {
-  "user_id": 2
+  "user_id": 4
 }
 ```
 
-5. Execute and confirm that `assigned_to` matches the adjuster ID.
+Replace `4` with the actual adjuster user ID and use your claim ID in the URL.
 
-Only an active user with the `adjuster` role is valid for this endpoint.
+### 9.7 Move the claim to Under Review
 
-### Step 11 — Move the claim to under review
-
-- Endpoint: `POST /claims/{claim_id}/status`
-- Authorize as the assigned `adjuster`, or as `reviewer`/`admin`.
-- Enter the claim ID from Step 7.
-- Request JSON:
+- Authorize as the assigned `adjuster` (or admin/reviewer where permitted by the route).
+- Run `POST /claims/{claim_id}/status` with:
 
 ```json
 {
@@ -280,268 +266,178 @@ Only an active user with the `adjuster` role is valid for this endpoint.
 }
 ```
 
-Click **Execute**. Expected: a successful response with status `under_review`.
+Expected: status `under_review`.
 
-If using the adjuster role, make sure that adjuster is assigned to the claim. The API enforces role-based access and valid status transitions.
+### 9.8 Add an adjuster note
 
-### Step 12 — Review the claim history
+Authorize as the assigned adjuster, admin, or reviewer. Run `POST /claims/{claim_id}/notes`:
 
-- Endpoint: `GET /claims/{claim_id}/history`
-- Enter the same claim ID.
+```json
+{
+  "text": "Review the hospital bill, discharge summary, prescriptions, diagnostic reports, policy limits, waiting periods, and applicable exclusions before making a decision."
+}
+```
+
+This is a sample note for demo purposes. Run `GET /claims/{claim_id}/notes` to see the saved note.
+
+### 9.9 View status history
+
+Run `GET /claims/{claim_id}/history`. The response shows each recorded status, the previous status, and any justification saved for an admin override.
+
+### 9.10 Make a decision and close the claim (optional)
+
+A reviewer or admin can decide the claim after review. Run `POST /claims/{claim_id}/status` with one of these bodies:
+
+Approve:
+```json
+{"status": "approved"}
+```
+
+Deny:
+```json
+{"status": "denied"}
+```
+
+Only choose one. After a decision, a later status update can close the claim:
+```json
+{"status": "closed"}
+```
+
+Do not close a claim unless you want to complete this demo workflow. Status transitions are enforced by the API.
+
+### 9.11 Analytics and audit
+
+- Authorize as `admin` or `reviewer`; run `GET /analytics/summary`.
+- Authorize as `admin`; run `GET /audit`.
+- The analytics response includes claim counts/statuses, amount totals, SLA/TAT metrics, and adjuster workload. Audit shows selected action metadata.
+
+## 10. Test the policy-document RAG workflow
+
+This is separate from submitting a claim. The policy document must be uploaded and processed before asking questions about it.
+
+### 10.1 Upload a policy PDF/DOCX
+
+Authorize as `admin`.
+
+- Expand `POST /documents`.
+- Click **Try it out**.
+- Fill the form fields:
+  - `policy_code`: for example `POL-0001`
+  - `document_name`: `Health Insurance Policy`
+  - `version`: `1`
+  - `effective_from`: `2026-01-01` (use a date appropriate for your demo)
+  - `replaces_document_id`: leave blank for a new document
+  - `file`: select the local PDF or DOCX file
 - Click **Execute**.
 
-Expected: an ordered list of status-history entries. It should include the initial `submitted` status and the change to `under_review`.
+Expected: `201 Created`, with `document_id` and status `UPLOADED`. Copy the returned `document_id`.
 
-### Step 13 — Add a claim note
+> A policy document's `policy_code` is metadata for the document search. It is not the numeric `policy_id` used when creating a claim.
 
-- Endpoint: `POST /claims/{claim_id}/notes`
-- Authorize as `admin`, `reviewer`, or the assigned `adjuster`.
-- Enter the claim ID and this JSON:
+### 10.2 Process the document
 
-```json
-{
-  "text": "Reviewed the submitted claim details."
-}
-```
-
-Click **Execute**. Expected: a successful response containing the new note ID and text.
-
-### Step 14 — List claim notes
-
-- Endpoint: `GET /claims/{claim_id}/notes`
-- Use the same claim ID.
+- Expand `POST /documents/{document_id}/process`.
+- Paste the exact `document_id` from the upload response into the path field.
 - Click **Execute**.
 
-Expected: the note created in Step 13 appears in the response.
+Expected: status `ACTIVE` and `is_active: true`. Processing extracts text, splits it into chunks, generates embeddings, and indexes them in Azure AI Search.
 
-### Step 15 — Approve or deny the claim (reviewer/admin)
+If it returns `503`, inspect the terminal running Uvicorn for the detailed error. Confirm the Blob Storage, Azure AI Search, and Azure OpenAI settings in `.env`, that the index exists, and that the service credentials are valid.
 
-The workflow allows a decision from `under_review` to `approved` or `denied`. Use **one** of the following statuses for this test.
+### 10.3 Ask a policy question
 
-- Endpoint: `POST /claims/{claim_id}/status`
-- Authorize as `reviewer` or `admin` (an adjuster cannot make the final decision).
-- Example JSON to approve:
+Authorize as `admin`, `reviewer`, `adjuster`, or `support_agent`.
 
-```json
-{
-  "status": "approved"
-}
-```
-
-Click **Execute** and confirm the status is `approved`.
-
-### Step 16 — Close the claim
-
-- Endpoint: `POST /claims/{claim_id}/status`
-- Stay authorized as `reviewer` or `admin`.
-- Request JSON:
+- Expand `POST /ai/query`.
+- Click **Try it out** and enter:
 
 ```json
 {
-  "status": "closed"
+  "question": "What documents should the adjuster verify for a hospitalization claim, and what policy conditions or exclusions should be checked?"
 }
 ```
 
-Click **Execute**. Expected: status becomes `closed`.
+Optionally, add `"policy_code": "POL-0001` to restrict retrieval to that policy code:
 
-If you chose `denied` in Step 15 instead, you can still move from `denied` to `closed`.
+```json
+{
+  "question": "What documents should the adjuster verify for a hospitalization claim, and what policy conditions or exclusions should be checked?",
+  "policy_code": "POL-0001"
+}
+```
 
-### Step 17 — Check analytics
+Expected: a response containing `answer`, `sources`, `response_time_ms`, and `status`. The status may be `ANSWERED`, `NO_MATCH`, `LOW_CONFIDENCE`, or `ERROR` depending on retrieval and service configuration. Check the source document/version/page references and verify the answer against the policy before relying on it. RAG does not automatically approve or deny a claim.
 
-- Endpoint: `GET /analytics/summary`
-- Authorize as `admin` or `reviewer`.
-- Click **Try it out** → **Execute**.
+### 10.4 List documents and check status
 
-Expected: a summary of claim counts/statuses, amounts, turnaround/SLA information, and adjuster workload, depending on the fields returned by your current code. The new claim should be reflected in the results.
+- `GET /documents` lists document metadata (authorized roles).
+- `GET /documents/{document_id}` shows one document's metadata.
+- `PATCH /documents/{document_id}/activation` can activate/deactivate a processed document. This endpoint uses a form field named `active` (`true` or `false`) and is admin-only.
 
-### Step 18 — Check audit events
+## 11. Start the dashboard (optional)
 
-- Endpoint: `GET /audit`
-- Authorize as `admin`.
-- Click **Try it out** → **Execute**.
+Keep the FastAPI terminal running. Open a second PowerShell terminal, go to the project root, and activate the same virtual environment:
 
-Expected: audit entries for supported actions such as policy creation, claim creation, assignment, status changes, and notes. Audit records are intended for action/resource/actor metadata, not passwords or bearer tokens.
+```powershell
+cd "C:\path\to\claimq"
+.\.venv\Scripts\Activate.ps1
+python -m streamlit run dashboard/app.py
+```
 
-## 7. Endpoint checklist
+Open **http://localhost:8501**. Sign in with `admin` or `reviewer` and password `demo123`. The dashboard calls the API at `http://127.0.0.1:8000` by default. To change that address, set `CLAIMIQ_API_URL` before starting Streamlit.
 
-Use this as a final checklist. Swagger is the source of truth for the endpoints enabled in your current checkout.
+## 12. Inspect PostgreSQL data (optional)
 
-| Order | Method | Endpoint | What to verify |
-|---:|---|---|---|
-| 1 | `GET` | `/health` | API process responds |
-| 2 | `POST` | `/auth/token` | Demo credentials issue a token |
-| 3 | `GET` | `/users/me` | Current role is correct |
-| 4 | `GET` | `/users` | Admin/reviewer can see users |
-| 5 | `GET` | `/policies` | Policies are listed |
-| 6 | `POST` | `/policies` | Admin can create a policy |
-| 7 | `POST` | `/claims` | Customer can submit a claim against an active policy |
-| 8 | `GET` | `/claims` | Customer sees their own claims |
-| 9 | `GET` | `/claims/{claim_id}` | Claim details are returned |
-| 10 | `POST` | `/claims/{claim_id}/assignment` | Admin/reviewer can assign an active adjuster |
-| 11 | `POST` | `/claims/{claim_id}/status` | Claim follows allowed workflow |
-| 12 | `GET` | `/claims/{claim_id}/history` | Status history is persisted |
-| 13 | `POST` | `/claims/{claim_id}/notes` | Note is saved |
-| 14 | `GET` | `/claims/{claim_id}/notes` | Saved notes are returned |
-| 15 | `GET` | `/analytics/summary` | Admin/reviewer can see analytics |
-| 16 | `GET` | `/audit` | Admin can inspect audit events |
-
-## 8. Inspect PostgreSQL tables and data
-
-You can inspect the database directly from the PostgreSQL container. Open a **new** terminal and run:
+Open another PowerShell terminal:
 
 ```powershell
 docker exec -it claimiq-postgres psql -U claimiq_local -d claimiq
 ```
 
-You should now see a PostgreSQL prompt similar to `claimiq=#`.
-
-### 8.1 List databases, tables, and table structure
-
-Run these commands inside `psql`:
+At the `claimiq=#` prompt, list tables:
 
 ```sql
-\conninfo
-\l
 \dt
-\d users
-\d policies
-\d claims
-\d status_history
-\d notes
-\d audit_logs
 ```
 
-If a table name differs in your version, use `\dt` to get the exact names created by the migration, then use `\d actual_table_name`.
-
-### 8.2 View data from each main table
+Read-only examples:
 
 ```sql
 SELECT id, username, role, active FROM users ORDER BY id;
-
-SELECT id, number, holder, active FROM policies ORDER BY id;
-
-SELECT id, policy_id, owner_id, assigned_to, description, amount, status
-FROM claims
-ORDER BY id;
-
-SELECT id, claim_id, actor_id, old_status, new_status, justification, created_at
-FROM status_history
-ORDER BY id;
-
-SELECT id, claim_id, author_id, text, created_at
-FROM notes
-ORDER BY id;
-
-SELECT id, actor_id, action, resource, created_at
-FROM audit_logs
-ORDER BY id DESC;
+SELECT id, number, holder, owner_id, active FROM policies ORDER BY id;
+SELECT id, policy_id, owner_id, assigned_to, amount, status FROM claims ORDER BY id;
+SELECT id, claim_id, old_status, new_status, justification, created_at
+FROM claim_status_history ORDER BY id;
+SELECT id, claim_id, author_id, text, created_at FROM claim_notes ORDER BY id;
+SELECT id, actor_id, action, resource, created_at FROM audit_logs ORDER BY id DESC;
+SELECT id, policy_code, document_name, version, status, is_active FROM documents ORDER BY uploaded_at DESC;
+SELECT question, answer, status, response_time_ms FROM chat_query_logs ORDER BY created_at DESC;
 ```
 
-These are read-only `SELECT` statements. If your migration uses different column names, inspect the table with `\d table_name` and adjust the query to match.
+Exit PostgreSQL with `\q`.
 
-### 8.3 See the claim together with its policy and customer
-
-```sql
-SELECT
-    c.id AS claim_id,
-    p.number AS policy_number,
-    p.holder AS policy_holder,
-    c.owner_id AS customer_user_id,
-    u.username AS customer_username,
-    c.assigned_to AS adjuster_user_id,
-    c.description,
-    c.amount,
-    c.status,
-    c.created_at
-FROM claims AS c
-JOIN policies AS p ON p.id = c.policy_id
-JOIN users AS u ON u.id = c.owner_id
-ORDER BY c.id DESC;
-```
-
-### 8.4 Count records in the main tables
-
-```sql
-SELECT 'users' AS table_name, COUNT(*) FROM users
-UNION ALL SELECT 'policies', COUNT(*) FROM policies
-UNION ALL SELECT 'claims', COUNT(*) FROM claims
-UNION ALL SELECT 'status_history', COUNT(*) FROM status_history
-UNION ALL SELECT 'notes', COUNT(*) FROM notes
-UNION ALL SELECT 'audit_logs', COUNT(*) FROM audit_logs;
-```
-
-To leave `psql`, run:
-
-```sql
-\q
-```
-
-### 8.5 Run a SQL query without opening the interactive prompt
-
-For example:
-
-```powershell
-docker exec -it claimiq-postgres psql -U claimiq_local -d claimiq -c "SELECT id, number, holder, active FROM policies ORDER BY id;"
-```
-
-## 9. Common problems
-
-### `connection refused` from the application
-
-- Check `docker ps` and `docker logs claimiq-postgres`.
-- Check PostgreSQL readiness with `docker exec -it claimiq-postgres pg_isready -U claimiq_local -d claimiq`.
-- Confirm the application URL uses host port `5433` and the correct password.
-- If you mapped a different host port, use that port in `DATABASE_URL`.
-
-### `relation "users" does not exist`
-
-The app connected to a database, but the migrations did not create the tables there. Confirm `DATABASE_URL` points to `claimiq`, then run:
-
-```powershell
-python -m alembic upgrade head
-python -m alembic current
-```
-
-### Swagger returns `401 Unauthorized`
-
-Click **Authorize** and log in again. Make sure you used the API demo account, not the PostgreSQL username/password. For role-restricted endpoints, switch to a role with permission.
-
-### Creating a claim returns `422`
-
-Check that `policy_id` is the ID of an existing **active** policy. Also check that `description` is not empty and `amount` is a non-negative number, following the request schema in Swagger.
-
-### Claim creation returns `503`
-
-The application could not find an active adjuster. Check `GET /users` as admin/reviewer and confirm the seed created an active adjuster account.
-
-### A status update returns `409` or `403`
-
-Use the allowed order: `submitted` → `under_review` → `approved` or `denied` → `closed`. A reviewer/admin should make the approve/deny decision. Admin-only overrides require a non-empty `justification`.
+## 13. Common problems
 
 ### Docker says the container name already exists
+Use `docker start claimiq-postgres`. Do not create another container with the same name.
 
-Start and reuse the existing container instead of creating a second one:
+### The application cannot connect to PostgreSQL
+Check `docker ps`, then run `docker exec -it claimiq-postgres pg_isready -U claimiq_local -d claimiq`. Check that `DATABASE_URL` uses the host port you published (5433 in this guide) and the same username/password as the container.
 
-```powershell
-docker start claimiq-postgres
-```
+### `python -m app.init_db` fails
+Read the full error in the terminal. Database table creation/seed needs PostgreSQL; the index setup additionally needs working Azure OpenAI embedding configuration and Azure AI Search access.
 
-## 10. Stop the application and database
+### Swagger returns `401 Unauthorized`
+Use `POST /auth/token`, then click **Authorize** and supply the new access token. PostgreSQL credentials are not the same as ClaimIQ login credentials.
 
-Stop FastAPI by pressing **Ctrl+C** in the Uvicorn terminal. To stop PostgreSQL but keep its data:
+### Swagger returns `403 Forbidden`
+The signed-in user may not have permission for that endpoint. Re-authorize as a role listed for that endpoint.
 
-```powershell
-docker stop claimiq-postgres
-```
+### Claim creation returns `422` or `409`
+Check that `policy_id` is the numeric ID of an active policy owned by the signed-in customer. The seeded `POL-0001` belongs to `customer`; `POL-0002` belongs to `customer2`, and so on.
 
-To start it again later:
+### RAG document processing returns `503`
+Check the Uvicorn terminal for the detailed exception. Confirm `.env` has correct Blob Storage, Azure AI Search, and Azure OpenAI configuration, the `policy-chunks` index is available, and the selected PDF/DOCX contains extractable text. Scanned/image-only PDFs are not OCR-processed.
 
-```powershell
-docker start claimiq-postgres
-```
-
-The named Docker volume `claimiq_pgdata` retains PostgreSQL data when the container is stopped or removed. Do not remove the volume unless you intentionally want to delete the local database data.
-
----
-
-**Reminder:** Use the Swagger request/response schema from your running application if it differs from an example in this guide. IDs are generated by the database, so always copy the actual returned IDs into subsequent requests.
+### RAG returns `NO_MATCH` or `LOW_CONFIDENCE`
+Confirm the document was successfully processed and is active, ask a question covered by the uploaded document, and check that `RAG_MIN_SEARCH_SCORE` is appropriate for your search configuration. Do not invent or assume an answer when no supporting policy passages are returned.
