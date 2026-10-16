@@ -13,6 +13,7 @@ from app.services.blob_service import BlobStorageService
 from app.services.embedding_service import EmbeddingService
 from app.services.ingestion_service import IngestionService
 from app.services.search_service import SearchService
+import logging
 router=APIRouter(prefix="/documents",tags=["documents"])
 ALLOWED_EXTENSIONS={".pdf",".docx"}
 def serialize(doc):
@@ -37,12 +38,31 @@ async def upload_document(policy_code:str=Form(...,min_length=1,max_length=100),
     except IntegrityError:
         db.rollback(); raise HTTPException(409,"This policy version already exists") from None
     return {"document_id":doc.id,"status":doc.status.value}
+logger = logging.getLogger(__name__)
 @router.post("/{document_id}/process")
-def process_document(document_id:str,db:Session=Depends(get_db),user:User=Depends(require("admin"))):
+def process_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("admin"))
+):
     try:
-        doc=IngestionService().process(document_id,db,user.id); return {"document_id":doc.id,"status":doc.status.value,"is_active":doc.is_active}
-    except ValueError as exc: raise HTTPException(404,str(exc)) from None
-    except Exception: raise HTTPException(503,"Document processing failed. Check server logs and configuration.") from None
+        doc = IngestionService().process(document_id, db, user.id)
+        return {
+            "document_id": doc.id,
+            "status": doc.status.value,
+            "is_active": doc.is_active
+        }
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from None
+    except Exception:
+        logger.exception(
+            "Document processing failed for document_id=%s",
+            document_id
+        )
+        raise HTTPException(
+            503,
+            "Document processing failed. Check server logs and configuration."
+        ) from None
 @router.get("")
 def list_documents(db:Session=Depends(get_db),user:User=Depends(require("admin","reviewer","adjuster","support_agent"))):
     return [serialize(d) for d in db.query(Document).order_by(Document.uploaded_at.desc()).all()]
