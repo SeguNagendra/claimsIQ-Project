@@ -14,6 +14,7 @@ from app.schemas import (
     ClaimCreate,
     ClaimOut,
     NoteCreate,
+    PolicyCreate,
     PolicyOut,
     StatusChange,
 )
@@ -218,6 +219,19 @@ def create_claim(
             detail="An active policy is required",
         )
 
+    if policy.owner_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Policy ownership must be assigned before submitting a claim",
+        )
+
+    if user.role == "customer" and policy.owner_id != user.id:
+        # Do not allow a customer to submit a claim against another customer's policy.
+        raise HTTPException(
+            status_code=403,
+            detail="This policy does not belong to the authenticated customer",
+        )
+
     # Find all active adjusters.
     adjusters = db.scalars(
         select(User)
@@ -260,7 +274,7 @@ def create_claim(
 
     claim = Claim(
         policy_id=policy.id,
-        owner_id=user.id,
+        owner_id=policy.owner_id,
         assigned_to=adjuster.id,
         description=data.description.strip(),
         amount=data.amount,
@@ -421,6 +435,7 @@ def change_claim_status(
             detail="Unknown claim status",
         )
 
+    # Check whether the requested transition is valid.
     override = new_status not in TRANSITIONS.get(
         claim.status,
         set(),
@@ -428,6 +443,8 @@ def change_claim_status(
 
     justification = (data.justification or "").strip()
 
+    # Only admins can override an invalid transition,
+    # and they must provide a justification.
     if override and (
         user.role != "admin" or not justification
     ):
@@ -439,15 +456,7 @@ def change_claim_status(
             ),
         )
 
-    if (
-        new_status in {"approved", "denied"}
-        and user.role == "adjuster"
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="Only a reviewer or admin can decide a claim",
-        )
-
+    # Prevent changing the claim to its current status.
     if new_status == claim.status:
         raise HTTPException(
             status_code=409,
@@ -468,8 +477,10 @@ def change_claim_status(
     if new_status == "closed" and claim.closed_at is None:
         claim.closed_at = now
 
+    # Update claim status.
     claim.status = new_status
 
+    # Record status history.
     db.add(
         StatusHistory(
             claim_id=claim.id,
@@ -480,6 +491,7 @@ def change_claim_status(
         )
     )
 
+    # Record audit event.
     add_audit(
         db,
         user,

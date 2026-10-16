@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class PolicyCreate(BaseModel):
     number: str = Field(min_length=1, max_length=80)
     holder: str = Field(min_length=1, max_length=150)
+    owner_id: int = Field(gt=0)
     active: bool = True
 
 
@@ -11,6 +12,7 @@ class PolicyOut(BaseModel):
     id: int
     number: str
     holder: str
+    owner_id: int | None
     active: bool
 
     model_config = ConfigDict(from_attributes=True)

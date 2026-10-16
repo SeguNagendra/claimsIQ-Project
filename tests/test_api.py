@@ -26,7 +26,7 @@ def test_role_protection(client, auth_headers):
     assert client.post(
         "/policies",
         headers=auth_headers("reviewer"),
-        json={"number": "NOPE", "holder": "Test", "active": True},
+        json={"number": "NOPE", "holder": "Test", "owner_id": 4, "active": True},
     ).status_code == 403
     assert client.get("/analytics/summary", headers=auth_headers("adjuster")).status_code == 403
     assert client.get("/audit", headers=auth_headers("reviewer")).status_code == 403
@@ -34,17 +34,23 @@ def test_role_protection(client, auth_headers):
 
 def test_policy_creation_duplicate_and_validation(client, auth_headers):
     admin = auth_headers("admin")
+    customer_id = next(
+        user["id"] for user in client.get("/users", headers=admin).json()
+        if user["username"] == "customer"
+    )
     response = client.post(
         "/policies",
         headers=admin,
-        json={"number": "NEW-001", "holder": "Example Holder", "active": True},
+        json={"number": "NEW-001", "holder": "Example Holder",
+              "owner_id": customer_id, "active": True},
     )
     assert response.status_code == 201
     assert response.json()["number"] == "NEW-001"
     duplicate = client.post(
         "/policies",
         headers=admin,
-        json={"number": "NEW-001", "holder": "Example Holder", "active": True},
+        json={"number": "NEW-001", "holder": "Example Holder",
+              "owner_id": customer_id, "active": True},
     )
     assert duplicate.status_code == 409
 
@@ -56,11 +62,40 @@ def test_claim_requires_active_policy(client, auth_headers):
         headers=customer,
         json={"policy_id": 999, "description": "Test claim", "amount": 100},
     ).status_code == 422
+    inactive_policy_id = next(
+        policy["id"] for policy in client.get("/policies", headers=customer).json()
+        if policy["number"] == "INACTIVE-001"
+    )
     assert client.post(
         "/claims",
         headers=customer,
-        json={"policy_id": 2, "description": "Test claim", "amount": 100},
+        json={"policy_id": inactive_policy_id, "description": "Test claim", "amount": 100},
     ).status_code == 422
+
+
+def test_customer_cannot_submit_claim_against_another_customers_policy(client, auth_headers):
+    customer = auth_headers("customer")
+    customer2 = auth_headers("customer2")
+    policy_id = client.get("/policies", headers=customer).json()[1]["id"]
+
+    response = client.post(
+        "/claims",
+        headers=customer,
+        json={"policy_id": policy_id, "description": "Unauthorized claim", "amount": 100},
+    )
+    assert response.status_code == 403
+
+    allowed = client.post(
+        "/claims",
+        headers=customer2,
+        json={"policy_id": policy_id, "description": "Authorized claim", "amount": 100},
+    )
+    assert allowed.status_code == 201, allowed.text
+    customer2_id = next(
+        user["id"] for user in client.get("/users", headers=auth_headers("admin")).json()
+        if user["username"] == "customer2"
+    )
+    assert allowed.json()["owner_id"] == customer2_id
 
 
 def test_claim_workflow_assignment_and_append_only_history(client, auth_headers):
@@ -84,8 +119,8 @@ def test_claim_workflow_assignment_and_append_only_history(client, auth_headers)
     assert initial_history[0]["old_status"] is None
     assert initial_history[0]["new_status"] == "submitted"
 
-    # Adjusters cannot see a claim before it is assigned.
-    assert client.get(f"/claims/{claim_id}", headers=adjuster).status_code == 404
+    # New claims are automatically assigned to an active adjuster.
+    assert client.get(f"/claims/{claim_id}", headers=adjuster).status_code == 200
     adjuster_id = next(
         user["id"] for user in client.get("/users", headers=admin).json()
         if user["username"] == "adjuster"
@@ -155,15 +190,17 @@ def test_admin_override_requires_justification(client, auth_headers):
 def test_claim_data_is_filtered_by_role(client, auth_headers):
     customer = auth_headers("customer")
     customer2 = auth_headers("customer2")
-    policy_id = client.get("/policies", headers=customer).json()[0]["id"]
-    claim = client.post(
+    policy_id = client.get("/policies", headers=customer).json()[1]["id"]
+    claim_response = client.post(
         "/claims",
-        headers=customer,
+        headers=customer2,
         json={"policy_id": policy_id, "description": "Customer private claim", "amount": 500},
-    ).json()
-    assert len(client.get("/claims", headers=customer).json()) == 1
-    assert client.get("/claims", headers=customer2).json() == []
-    assert client.get(f"/claims/{claim['id']}", headers=customer2).status_code == 404
+    )
+    assert claim_response.status_code == 201, claim_response.text
+    claim = claim_response.json()
+    assert client.get("/claims", headers=customer).json() == []
+    assert len(client.get("/claims", headers=customer2).json()) == 1
+    assert client.get(f"/claims/{claim['id']}", headers=customer).status_code == 404
 
 
 def test_notes_and_audit(client, auth_headers):
@@ -215,8 +252,8 @@ def test_analytics_empty_and_populated(client, auth_headers):
     assert summary["by_status"] == {"submitted": 2}
     assert summary["total_amount"] == 400
     assert summary["average_amount"] == 200.0
-    assert summary["assigned_claims"] == 0
-    assert summary["unassigned_claims"] == 2
+    assert summary["assigned_claims"] == 2
+    assert summary["unassigned_claims"] == 0
 
 
 def test_unauthenticated_protected_endpoint(client):

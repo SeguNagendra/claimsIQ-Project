@@ -149,8 +149,13 @@ Demo users all have password `demo123`:
 | `reviewer` | reviewer |
 | `adjuster` | adjuster |
 | `customer` | customer |
+| `customer2` through `customer50` | customer |
+| `adjuster1` through `adjuster5` | adjuster |
+| `support_agent` | support_agent |
 
-The seed policy number is `DEMO-001`. Demo data is for local testing only.
+Demo users all have password `demo123`. The seed creates policies `POL-0001` through `POL-0050`; each sample policy is assigned to its matching customer account (`POL-0001` belongs to `customer`, `POL-0002` belongs to `customer2`, and so on). New claims are automatically assigned to the active adjuster with the fewest open claims. Demo data and passwords are for local development only.
+
+**Policy ownership:** `POST /policies` is admin-only and requires `number`, `holder`, `owner_id`, and optional `active`. The `owner_id` must identify an active customer. Customers can submit claims only against their own policies. When upgrading an existing local database, `python -m app.init_db` adds the policy-owner column if needed and backfills the known sample policies. Other legacy policies are deliberately left unowned rather than guessing; assign their `owner_id` to the correct customer before accepting claims against them.
 
 ## 6. Start the API locally
 
@@ -170,16 +175,17 @@ In Swagger, click **Authorize** and log in using the `/auth/token` endpoint. The
 1. `POST /auth/token` — sign in as `admin` or `customer`.
 2. `GET /users/me` — verify the logged-in user and role.
 3. `GET /policies` — list policies.
-4. `POST /policies` as admin — create a policy.
-5. `POST /claims` as customer — create a claim using the policy's numeric `id`.
-6. `GET /claims` — verify role-based filtering.
-7. `POST /claims/{claim_id}/assignment` as admin/reviewer — assign to the adjuster user ID.
-8. `POST /claims/{claim_id}/status` as adjuster — move the claim to `under_review`.
-9. `POST /claims/{claim_id}/status` as reviewer/admin — move it to `approved` or `denied`.
-10. `GET /claims/{claim_id}/history` — verify status history.
-11. `POST /claims/{claim_id}/notes` and `GET /claims/{claim_id}/notes`.
-12. `GET /analytics/summary` as admin/reviewer.
-13. `GET /audit` as admin.
+4. `GET /users` as admin — find the intended customer's numeric `id`.
+5. `POST /policies` as admin — create a policy with `number`, `holder`, and that customer's `owner_id`.
+6. `POST /claims` as the policy's customer — create a claim using the policy's numeric `id`. A different customer should receive `403`.
+7. `GET /claims` — verify role-based filtering.
+8. `POST /claims/{claim_id}/assignment` as admin/reviewer — assign to the adjuster user ID if reassignment is needed.
+9. `POST /claims/{claim_id}/status` as adjuster — move the claim to `under_review`.
+10. `POST /claims/{claim_id}/status` as reviewer/admin — move it to `approved` or `denied`.
+11. `GET /claims/{claim_id}/history` — verify status history.
+12. `POST /claims/{claim_id}/notes` and `GET /claims/{claim_id}/notes`.
+13. `GET /analytics/summary` as admin/reviewer.
+14. `GET /audit` as admin.
 
 Valid workflow:
 

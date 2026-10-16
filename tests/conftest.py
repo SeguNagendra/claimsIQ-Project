@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -26,8 +27,14 @@ def client():
             db.add(User(username=role, role="customer" if role == "customer2" else role,
                         password_hash=hash_password("demo123"), active=True))
         db.flush()
-        db.add(Policy(number="TEST-001", holder="Test Policy Holder", active=True))
-        db.add(Policy(number="INACTIVE-001", holder="Inactive Holder", active=False))
+        customer = db.scalar(select(User).where(User.username == "customer"))
+        customer2 = db.scalar(select(User).where(User.username == "customer2"))
+        db.add(Policy(number="TEST-001", holder="Test Policy Holder",
+                      owner_id=customer.id, active=True))
+        db.add(Policy(number="TEST-002", holder="Second Customer Holder",
+                      owner_id=customer2.id, active=True))
+        db.add(Policy(number="INACTIVE-001", holder="Inactive Holder",
+                      owner_id=customer.id, active=False))
 
     def override_get_db():
         with TestingSessionLocal() as db:

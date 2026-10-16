@@ -26,6 +26,13 @@ class Policy(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     number: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     holder: Mapped[str] = mapped_column(String(150))
+    # Nullable only to allow safe migration of legacy policies. Claims can be
+    # submitted only when a policy has an explicit owner.
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"),
+        index=True,
+        nullable=True,
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -69,7 +76,7 @@ class Claim(Base):
     # TAT and SLA timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=now,
+        default=utc_now,
         nullable=False,
     )
 
