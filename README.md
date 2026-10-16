@@ -1,6 +1,6 @@
-# ClaimIQ — Claims Management and Analytics (Local API)
+# ClaimIQ — Claims, Analytics, Document Management and RAG
 
-This phase contains **only** the Claims Management module and analytics. Document Management and RAG are separate future modules and are intentionally not included.
+This project includes the Claims Management module, Analytics, Document Management, and Azure-backed RAG policy Q&A.
 
 The FastAPI backend runs directly on your local machine. PostgreSQL is expected to be the PostgreSQL container you already started with Docker. This project does not build or run a backend/frontend Docker image and has no Docker Compose file.
 
@@ -213,3 +213,27 @@ python -m pytest -v
 - `Address already in use`: use another API port, e.g. `--port 8001`, and open the matching URL.
 
 This is a local development starter, not production deployment configuration. Do not expose it publicly or use demo credentials for real data.
+
+
+## Document Management and RAG
+
+The existing Claims Management and Analytics endpoints remain in place. New endpoints:
+
+- `POST /api/v1/documents` (also available at `/documents`) — Admin uploads a PDF/DOCX using multipart fields `policy_code`, `document_name`, `version`, `effective_from`, optional `replaces_document_id`, and `file`.
+- `POST /api/v1/documents/{document_id}/process` (also `/documents/{document_id}/process`) — Admin extracts text, chunks it, generates Azure OpenAI embeddings, and indexes chunks in Azure AI Search.
+- `GET /api/v1/documents` and `GET /api/v1/documents/{document_id}` (also available unversioned) — authorized operational roles inspect document metadata.
+- `PATCH /api/v1/documents/{document_id}/activation` (also unversioned) — Admin activates/deactivates a processed document; send multipart field `active=true` or `active=false`.
+- `POST /api/v1/ai/query` (also `/ai/query`) — authenticated Admin, Reviewer, Adjuster, or Support Agent asks a policy question. JSON: `{"question":"What is covered?","policy_code":"optional policy code"}`. The response contains an answer, document/page/chunk sources, response time, and status.
+
+### Azure setup
+
+1. Create a private Blob Storage container (default `policy-documents`).
+2. Configure Azure AI Search and Azure OpenAI embedding/chat deployments.
+3. Copy `.env.example` to `.env` and set the Azure endpoints and exact deployment names. Use Microsoft Entra ID or optional keys/connection string.
+4. With Entra ID, run `az login` and grant the identity appropriate Blob data permissions, Search index/document permissions, and `Cognitive Services OpenAI User` on the Azure OpenAI resource.
+5. Install dependencies with `pip install -r requirements.txt`.
+6. Create the vector index with `python -m scripts.create_search_index`.
+7. Create/update database tables with `python -m app.init_db`.
+8. Start the API and use `/docs`.
+
+Uploader/query identities come from the existing JWT, not client-supplied user IDs. Only Admin can upload/process/activate/deactivate documents. Retrieval filters to active chunks. Scanned PDFs without embedded text currently require OCR. Azure configuration is only needed for RAG endpoints; Claims and Analytics do not initialize Azure clients.

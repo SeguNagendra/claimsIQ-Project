@@ -47,3 +47,21 @@ class StatusChange(BaseModel):
 
 class NoteCreate(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
+
+
+from datetime import date
+from pydantic import Field
+class PolicyQueryRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=2000)
+    policy_code: str | None = Field(default=None, max_length=100)
+class SourceReference(BaseModel):
+    document_id: str
+    document_name: str
+    version: str
+    page_number: int | None = None
+    chunk_id: str
+class PolicyQueryResponse(BaseModel):
+    answer: str
+    sources: list[SourceReference]
+    response_time_ms: int
+    status: str

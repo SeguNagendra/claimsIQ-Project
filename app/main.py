@@ -19,17 +19,22 @@ from app.schemas import (
     StatusChange,
 )
 from app.security import current_user, require, token_for, verify_password
+from app.api.document_routes import router as document_router
+from app.api.query_routes import router as query_router
 
 
 app = FastAPI(
     title="ClaimIQ Claims Management API",
     description=(
         "Local API for users, policies, claims, assignment, workflow, notes, "
-        "audit and analytics. Document Management and RAG are separate future modules."
+        "audit, analytics, policy document management, and source-cited RAG question answering."
     ),
     version="1.0.0",
 )
 
+
+app.include_router(document_router, prefix="/api/v1")
+app.include_router(query_router, prefix="/api/v1")
 
 VALID_STATUSES = {
     "submitted",

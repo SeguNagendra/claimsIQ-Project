@@ -4,8 +4,8 @@ def test_health_and_openapi(client):
     spec = client.get("/openapi.json").json()
     assert "/claims" in spec["paths"]
     assert "/analytics/summary" in spec["paths"]
-    assert not any(path.startswith("/documents") for path in spec["paths"])
-    assert not any(path.startswith("/rag") for path in spec["paths"])
+    assert "/documents" in spec["paths"]
+    assert "/ai/query" in spec["paths"]
 
 
 def test_password_login_and_me(client, auth_headers):
