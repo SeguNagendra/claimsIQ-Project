@@ -131,29 +131,17 @@ sequenceDiagram
 
 
 | Part | In simple words |
-
 |---|---|
-
 | FastAPI | The backend that receives requests and applies the application's rules. |
-
 | Swagger UI (`/docs`) | A web page for trying the API endpoints manually. |
-
 | PostgreSQL | The database that stores users, policies, claims, notes, status history, document records, and query logs. |
-
 | JWT token | A temporary login credential sent with protected API requests. |
-
 | Azure Blob Storage | Stores uploaded policy files. |
-
 | Text extraction | Reads text from a supported PDF or DOCX file. Scanned PDFs may need OCR, which this project does not provide. |
-
 | Chunking | Splits extracted text into smaller passages so relevant sections can be found. |
-
 | Embeddings | Converts text into numeric vectors that represent meaning. |
-
 | Azure AI Search | Finds relevant passages from the indexed policy chunks. |
-
 | Azure OpenAI chat deployment | Writes a response using the retrieved policy passages and the RAG prompt. |
-
 | Streamlit dashboard | Shows claim totals, assigned/unassigned claims, amounts, and status charts by calling the analytics API. |
 
 
@@ -201,17 +189,11 @@ The API enforces the transition rules. An invalid transition can only be overrid
 
 
 | Role | Main capabilities in the current code |
-
 |---|---|
-
 | `customer` | View own policies and claims; submit a claim against their own active policy. |
-
 | `adjuster` | View claims assigned to them; add notes; move assigned claims to review; ask policy questions. |
-
 | `reviewer` | Review and assign claims, make approval/denial decisions, add notes, view analytics, and ask policy questions. |
-
 | `admin` | Administer users/policies, assign claims, override invalid status transitions with justification, view audit logs and analytics, manage policy documents, and ask policy questions. |
-
 | `support_agent` | View claims/documents permitted by the API and ask policy questions; does not receive claim mutation permissions by default. |
 
 
@@ -376,25 +358,15 @@ erDiagram
 
 
 | Table | What it stores |
-
 |---|---|
-
 | `users` | Usernames, password hashes, roles, and active/inactive state. |
-
 | `policies` | Policy number, holder, owner/customer, and active state. |
-
 | `claims` | Claim description, amount, customer, policy, assigned adjuster, current status, and workflow timestamps. |
-
 | `claim_status_history` | Each recorded status transition, who performed it, and any justification saved for an admin override. |
-
 | `claim_notes` | Notes/comments attached to a claim and the user who wrote each note. |
-
 | `audit_logs` | Metadata about selected actions, such as the actor, action, and resource. |
-
 | `documents` | Uploaded policy document metadata, status, version, effective date, and Blob Storage path. |
-
 | `document_chunks` | Extracted passages from a document, including chunk number, page number, and active state. |
-
 | `chat_query_logs` | Policy questions, answers, source references, response time, status, and user. |
 
 
@@ -539,51 +511,28 @@ The table below documents the columns defined by the current SQLAlchemy models. 
 
 
 | Method | Endpoint | Purpose |
-
 |---|---|---|
-
 | `GET` | `/health` | Check that the API process responds. |
-
 | `POST` | `/auth/token` | Sign in and receive a bearer token. |
-
 | `GET` | `/users/me` | View the current user's identity and role. |
-
 | `GET` | `/users` | List users (admin/reviewer). |
-
 | `GET` | `/policies` | List policies for an authenticated user. |
-
 | `POST` | `/policies` | Create a policy (admin only in the current code). |
-
 | `POST` | `/claims` | Submit a claim. |
-
 | `GET` | `/claims` | List claims visible to the signed-in user. |
-
 | `GET` | `/claims/{claim_id}` | Read a claim. |
-
 | `POST` | `/claims/{claim_id}/assignment` | Assign an active adjuster (admin/reviewer). |
-
 | `POST` | `/claims/{claim_id}/status` | Change claim status subject to workflow permissions. |
-
 | `GET` | `/claims/{claim_id}/history` | View claim status history. |
-
 | `POST` | `/claims/{claim_id}/notes` | Add a claim note. |
-
 | `GET` | `/claims/{claim_id}/notes` | List claim notes. |
-
 | `GET` | `/analytics/summary` | Get analytics (admin/reviewer). |
-
 | `GET` | `/audit` | View audit records (admin). |
-
 | `POST` | `/documents` | Upload a policy PDF/DOCX (admin). |
-
 | `POST` | `/documents/{document_id}/process` | Extract, chunk, embed, and index a document (admin). |
-
 | `GET` | `/documents` | List uploaded documents for authorized roles. |
-
 | `GET` | `/documents/{document_id}` | Read document metadata for authorized roles. |
-
 | `PATCH` | `/documents/{document_id}/activation` | Activate/deactivate a processed document (admin). |
-
 | `POST` | `/ai/query` | Ask a question about processed policy documents. |
 
 
