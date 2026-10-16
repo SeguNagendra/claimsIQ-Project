@@ -2,7 +2,11 @@
 
 This project includes the Claims Management module, Analytics, Document Management, and Azure-backed RAG policy Q&A.
 
-The FastAPI backend runs directly on your local machine. PostgreSQL is expected to be the PostgreSQL container you already started with Docker. This project does not build or run a backend/frontend Docker image and has no Docker Compose file.
+The FastAPI backend and Streamlit dashboard can run locally or as Docker
+containers. PostgreSQL runs in a Docker container for local use and in a
+persistent StatefulSet inside AKS for deployment; no Azure Database for
+PostgreSQL instance is used. See [utilities/README.md](utilities/README.md)
+for Compose and GitHub Actions deployment instructions.
 
 ## Included modules
 

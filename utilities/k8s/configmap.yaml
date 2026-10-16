@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claimiq-config
+  namespace: claimiq
+data:
+  ACCESS_TOKEN_MINUTES: "120"
+  RAG_TOP_K: "5"
+  RAG_MIN_SEARCH_SCORE: "0.5"
+  MAX_DOCUMENT_SIZE_MB: "10"
+  AZURE_STORAGE_CONTAINER: "policy-documents"
+  AZURE_SEARCH_INDEX_NAME: "policy-chunks"
