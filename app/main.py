@@ -1,79 +1,141 @@
-import io
-import re
-import uuid
-from collections import Counter
 
-import pandas as pd
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from collections import Counter
+from datetime import datetime, timezone, timedelta
+
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel, Field
-from pypdf import PdfReader
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from app.config import UPLOAD_DIR
-from app.db import get_db
-from app.models import Audit, Chunk, Claim, Document, Note, Policy, StatusHistory, User
+from app.database import get_db
+from app.models import Audit, Claim, Note, Policy, StatusHistory, User
+from app.schemas import (
+    AssignmentCreate,
+    ClaimCreate,
+    ClaimOut,
+    NoteCreate,
+    PolicyCreate,
+    PolicyOut,
+    StatusChange,
+)
 from app.security import current_user, require, token_for, verify_password
-
-app = FastAPI(title="ClaimIQ Pure Local", version="1.0.0")
-
-
-class PolicyIn(BaseModel):
-    number: str = Field(min_length=1, max_length=80)
-    holder: str = Field(min_length=1, max_length=150)
-    active: bool = True
+from app.api.document_routes import router as document_router
+from app.api.query_routes import router as query_router
 
 
-class ClaimIn(BaseModel):
-    policy_id: int
-    description: str = Field(min_length=1)
-    amount: int = Field(ge=0)
+app = FastAPI(
+    title="ClaimIQ Claims Management API",
+    description=(
+        "Local API for users, policies, claims, assignment, workflow, notes, "
+        "audit, analytics, policy document management, and source-cited RAG question answering."
+    ),
+    version="1.0.0",
+)
 
 
-class AssignmentIn(BaseModel):
-    user_id: int
+app.include_router(document_router, prefix="/api/v1")
+app.include_router(query_router, prefix="/api/v1")
+
+VALID_STATUSES = {
+    "submitted",
+    "under_review",
+    "approved",
+    "denied",
+    "closed",
+}
+
+TRANSITIONS = {
+    "submitted": {"under_review"},
+    "under_review": {"approved", "denied"},
+    "approved": {"closed"},
+    "denied": {"closed"},
+    "closed": set(),
+}
+
+SLA_TARGET_HOURS = 48
 
 
-class StatusIn(BaseModel):
-    status: str
-    justification: str | None = None
+def utc_now() -> datetime:
+    """Return the current UTC timestamp."""
+    return datetime.now(timezone.utc)
 
 
-class NoteIn(BaseModel):
-    text: str = Field(min_length=1)
+def normalize_datetime(value: datetime | None) -> datetime | None:
+    """Make a datetime timezone-aware for safe comparisons."""
+    if value is None:
+        return None
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value
 
 
-class DocumentState(BaseModel):
-    active: bool
-    approved: bool
+def add_audit(
+    db: Session,
+    user: User,
+    action: str,
+    resource: str,
+) -> None:
+    # Avoid storing credentials, claim descriptions, or other user-supplied PII.
+    db.add(
+        Audit(
+            actor_id=user.id,
+            action=action,
+            resource=resource,
+        )
+    )
 
 
-class Question(BaseModel):
-    question: str = Field(min_length=1)
-
-
-def log(db: Session, user: User, action: str, resource: str) -> None:
-    # Only action, resource class and actor ID; never user input, credentials or PII.
-    db.add(Audit(actor_id=user.id, action=action, resource=resource))
-
-
-def visible(db: Session, claim_id: int, user: User) -> Claim:
+def get_visible_claim(
+    db: Session,
+    claim_id: int,
+    user: User,
+) -> Claim:
     claim = db.get(Claim, claim_id)
+
     if claim is None:
-        raise HTTPException(404, "Claim not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Claim not found",
+        )
+
     if user.role == "customer" and claim.owner_id != user.id:
-        raise HTTPException(404, "Claim not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Claim not found",
+        )
+
     if user.role == "adjuster" and claim.assigned_to != user.id:
-        raise HTTPException(404, "Claim not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Claim not found",
+        )
+
+    # Support Agents can look up claims, but mutation endpoints do not
+    # grant this role permission to create, assign, or change claim status.
+    if user.role == "support_agent":
+        return claim
+
+    if user.role not in {"customer", "adjuster", "support_agent", "admin", "reviewer"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
+
     return claim
 
 
-def claim_out(c: Claim) -> dict:
-    return {"id": c.id, "policy_id": c.policy_id, "owner_id": c.owner_id,
-            "assigned_to": c.assigned_to, "description": c.description,
-            "amount": c.amount, "status": c.status}
+def claim_response(claim: Claim) -> dict:
+    return {
+        "id": claim.id,
+        "policy_id": claim.policy_id,
+        "owner_id": claim.owner_id,
+        "assigned_to": claim.assigned_to,
+        "description": claim.description,
+        "amount": claim.amount,
+        "status": claim.status,
+    }
 
 
 @app.get("/health", tags=["system"])
@@ -81,248 +143,634 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/auth/token", tags=["auth"])
-def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.username == form.username))
-    if user is None or not user.active or not verify_password(form.password, user.password_hash):
-        raise HTTPException(401, "Invalid credentials")
-    return {"access_token": token_for(user), "token_type": "bearer"}
+@app.post("/auth/token", tags=["authentication"])
+def login(
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    user = db.scalar(
+        select(User).where(User.username == form.username)
+    )
+
+    if (
+        user is None
+        or not user.active
+        or not verify_password(form.password, user.password_hash)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials",
+        )
+
+    return {
+        "access_token": token_for(user),
+        "token_type": "bearer",
+    }
 
 
 @app.get("/users/me", tags=["users"])
-def me(user: User = Depends(current_user)):
-    return {"id": user.id, "username": user.username, "role": user.role}
+def get_me(user: User = Depends(current_user)):
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": user.role,
+    }
 
 
 @app.get("/users", tags=["users"])
-def users(db: Session = Depends(get_db), user: User = Depends(require("admin", "reviewer"))):
-    return [{"id": u.id, "username": u.username, "role": u.role} for u in db.scalars(select(User))]
+def list_users(
+    db: Session = Depends(get_db),
+    user: User = Depends(require("admin", "reviewer")),
+):
+    return [
+        {
+            "id": item.id,
+            "username": item.username,
+            "role": item.role,
+            "active": item.active,
+        }
+        for item in db.scalars(select(User).order_by(User.id))
+    ]
 
 
-@app.get("/policies", tags=["policies"])
-def policies(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    return [{"id": p.id, "number": p.number, "active": p.active} for p in db.scalars(select(Policy))]
+@app.get(
+    "/policies",
+    response_model=list[PolicyOut],
+    tags=["policies"],
+)
+def list_policies(
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    return list(db.scalars(select(Policy).order_by(Policy.id)))
 
 
-@app.post("/policies", tags=["policies"])
-def create_policy(data: PolicyIn, db: Session = Depends(get_db), user: User = Depends(require("admin"))):
-    if db.scalar(select(Policy).where(Policy.number == data.number)):
-        raise HTTPException(409, "Policy already exists")
-    policy = Policy(**data.model_dump())
-    db.add(policy)
-    log(db, user, "create", "policy")
-    db.commit()
-    db.refresh(policy)
-    return {"id": policy.id}
-
-
-@app.post("/claims", tags=["claims"])
-def create_claim(data: ClaimIn, db: Session = Depends(get_db), user: User = Depends(require("customer", "admin"))):
+@app.post(
+    "/claims",
+    response_model=ClaimOut,
+    status_code=201,
+    tags=["claims"],
+)
+def create_claim(
+    data: ClaimCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("customer", "admin")),
+):
     policy = db.get(Policy, data.policy_id)
+
     if policy is None or not policy.active:
-        raise HTTPException(422, "Active policy required")
-    claim = Claim(**data.model_dump(), owner_id=user.id)
+        raise HTTPException(
+            status_code=422,
+            detail="An active policy is required",
+        )
+
+    if policy.owner_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Policy ownership must be assigned before submitting a claim",
+        )
+
+    if user.role == "customer" and policy.owner_id != user.id:
+        # Do not allow a customer to submit a claim against another customer's policy.
+        raise HTTPException(
+            status_code=403,
+            detail="This policy does not belong to the authenticated customer",
+        )
+
+    # Find all active adjusters.
+    adjusters = db.scalars(
+        select(User)
+        .where(
+            User.role == "adjuster",
+            User.active.is_(True),
+        )
+        .order_by(User.id)
+    ).all()
+
+    if not adjusters:
+        raise HTTPException(
+            status_code=503,
+            detail="No active adjuster is available to assign this claim",
+        )
+
+    # Count each adjuster's currently assigned open claims.
+    open_statuses = {"submitted", "under_review"}
+    claim_counts = {}
+
+    for adjuster in adjusters:
+        claim_counts[adjuster.id] = (
+            db.scalar(
+                select(func.count(Claim.id)).where(
+                    Claim.assigned_to == adjuster.id,
+                    Claim.status.in_(open_statuses),
+                )
+            )
+            or 0
+        )
+
+    # Choose the adjuster with the fewest open claims.
+    adjuster = min(
+        adjusters,
+        key=lambda item: (claim_counts[item.id], item.id),
+    )
+
+    # Record submission and initial assignment timestamps.
+    now = utc_now()
+
+    claim = Claim(
+        policy_id=policy.id,
+        owner_id=policy.owner_id,
+        assigned_to=adjuster.id,
+        description=data.description.strip(),
+        amount=data.amount,
+        status="submitted",
+        created_at=now,
+        assigned_at=now,
+    )
+
     db.add(claim)
-    log(db, user, "create", "claim")
+    db.flush()
+
+    db.add(
+        StatusHistory(
+            claim_id=claim.id,
+            actor_id=user.id,
+            old_status=None,
+            new_status="submitted",
+            justification="Initial submission",
+        )
+    )
+
+    add_audit(db, user, "create", "claim")
+
     db.commit()
     db.refresh(claim)
-    return claim_out(claim)
+
+    return claim_response(claim)
 
 
-@app.get("/claims", tags=["claims"])
-def list_claims(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    query = select(Claim)
+@app.get(
+    "/claims",
+    response_model=list[ClaimOut],
+    tags=["claims"],
+)
+def list_claims(
+    policy_number: str | None = None,
+    claimant: str | None = None,
+    status: str | None = None,
+    claim_id: int | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    # Join policies so claims can be searched by policy number and holder.
+    query = select(Claim).join(Policy, Claim.policy_id == Policy.id)
+
+    # Claim ID is the claim number used for direct lookup.
+    if claim_id is not None:
+        if claim_id < 1:
+            raise HTTPException(
+                status_code=422,
+                detail="claim_id must be a positive integer",
+            )
+        query = query.where(Claim.id == claim_id)
+
+    # Preserve the existing customer and adjuster visibility restrictions.
     if user.role == "customer":
         query = query.where(Claim.owner_id == user.id)
-    if user.role == "adjuster":
+    elif user.role == "adjuster":
         query = query.where(Claim.assigned_to == user.id)
-    return [claim_out(c) for c in db.scalars(query)]
+    elif user.role not in {"support_agent", "admin", "reviewer"}:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if policy_number and policy_number.strip():
+        query = query.where(
+            Policy.number.ilike(f"%{policy_number.strip()}%")
+        )
+
+    # The current data model stores the policyholder in Policy.holder.
+    # If claimant and policyholder are different people, add claimant_name
+    # to Claim and search that field instead.
+    if claimant and claimant.strip():
+        query = query.where(
+            Policy.holder.ilike(f"%{claimant.strip()}%")
+        )
+
+    if status and status.strip():
+        normalized_status = status.strip().lower()
+        if normalized_status not in VALID_STATUSES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid status. Allowed statuses: {sorted(VALID_STATUSES)}",
+            )
+        query = query.where(Claim.status == normalized_status)
+
+    query = query.order_by(Claim.id)
+    return [claim_response(claim) for claim in db.scalars(query).all()]
 
 
-@app.get("/claims/{claim_id}", tags=["claims"])
-def get_claim(claim_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    return claim_out(visible(db, claim_id, user))
+@app.get(
+    "/claims/{claim_id}",
+    response_model=ClaimOut,
+    tags=["claims"],
+)
+def get_claim(
+    claim_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    return claim_response(
+        get_visible_claim(db, claim_id, user)
+    )
 
 
-@app.post("/claims/{claim_id}/assignment", tags=["assignments"])
-def assign(claim_id: int, data: AssignmentIn, db: Session = Depends(get_db), user: User = Depends(require("admin", "reviewer"))):
-    claim = visible(db, claim_id, user)
-    assignee = db.get(User, data.user_id)
-    if assignee is None or not assignee.active or assignee.role != "adjuster":
-        raise HTTPException(422, "Active adjuster required")
-    claim.assigned_to = assignee.id
-    log(db, user, "assign", "claim")
+@app.post(
+    "/claims/{claim_id}/assignment",
+    response_model=ClaimOut,
+    tags=["assignment"],
+)
+def assign_claim(
+    claim_id: int,
+    data: AssignmentCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("admin", "reviewer")),
+):
+    claim = get_visible_claim(db, claim_id, user)
+
+    adjuster = db.get(User, data.user_id)
+
+    if (
+        adjuster is None
+        or not adjuster.active
+        or adjuster.role != "adjuster"
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="An active adjuster user is required",
+        )
+
+    claim.assigned_to = adjuster.id
+    claim.assigned_at = utc_now()
+
+    add_audit(db, user, "assign", "claim")
+
     db.commit()
-    return claim_out(claim)
+    db.refresh(claim)
+
+    return claim_response(claim)
 
 
-TRANSITIONS = {"submitted": {"under_review"}, "under_review": {"approved", "denied"},
-               "approved": {"closed"}, "denied": {"closed"}, "closed": set()}
+@app.post(
+    "/claims/{claim_id}/status",
+    response_model=ClaimOut,
+    tags=["workflow"],
+)
+def change_claim_status(
+    claim_id: int,
+    data: StatusChange,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("admin", "reviewer", "adjuster")),
+):
+    claim = get_visible_claim(db, claim_id, user)
 
+    new_status = data.status.strip().lower()
 
-@app.post("/claims/{claim_id}/status", tags=["status"])
-def change_status(claim_id: int, data: StatusIn, db: Session = Depends(get_db),
-                  user: User = Depends(require("admin", "reviewer", "adjuster"))):
-    claim = visible(db, claim_id, user)
-    if data.status not in TRANSITIONS:
-        raise HTTPException(422, "Unknown status")
-    override = data.status not in TRANSITIONS[claim.status]
-    if override and (user.role != "admin" or not data.justification or not data.justification.strip()):
-        raise HTTPException(409, "Admin override requires justification")
-    if data.status in {"approved", "denied"} and user.role == "adjuster":
-        raise HTTPException(403, "Decision requires reviewer or admin")
-    db.add(StatusHistory(claim_id=claim.id, actor_id=user.id, old_status=claim.status,
-                         new_status=data.status, justification=data.justification if override else None))
-    claim.status = data.status
-    log(db, user, "override_status" if override else "change_status", "claim")
+    if new_status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail="Unknown claim status",
+        )
+
+    # Check whether the requested transition is valid.
+    override = new_status not in TRANSITIONS.get(
+        claim.status,
+        set(),
+    )
+
+    justification = (data.justification or "").strip()
+
+    # Only admins can override an invalid transition,
+    # and they must provide a justification.
+    if override and (
+        user.role != "admin" or not justification
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Invalid status transition; an admin override "
+                "requires a justification"
+            ),
+        )
+
+    # Prevent changing the claim to its current status.
+    if new_status == claim.status:
+        raise HTTPException(
+            status_code=409,
+            detail="Claim already has this status",
+        )
+
+    now = utc_now()
+    previous_status = claim.status
+
+    # Record the first decision timestamp.
+    if (
+        new_status in {"approved", "denied"}
+        and claim.decision_at is None
+    ):
+        claim.decision_at = now
+
+    # Record the first closure timestamp.
+    if new_status == "closed" and claim.closed_at is None:
+        claim.closed_at = now
+
+    # Update claim status.
+    claim.status = new_status
+
+    # Record status history.
+    db.add(
+        StatusHistory(
+            claim_id=claim.id,
+            actor_id=user.id,
+            old_status=previous_status,
+            new_status=new_status,
+            justification=justification if override else None,
+        )
+    )
+
+    # Record audit event.
+    add_audit(
+        db,
+        user,
+        "override_status" if override else "change_status",
+        "claim",
+    )
+
     db.commit()
-    return claim_out(claim)
+    db.refresh(claim)
+
+    return claim_response(claim)
 
 
-@app.get("/claims/{claim_id}/history", tags=["status"])
-def history(claim_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    visible(db, claim_id, user)
-    return [{"id": h.id, "old": h.old_status, "new": h.new_status,
-             "justification": h.justification} for h in db.scalars(
-                 select(StatusHistory).where(StatusHistory.claim_id == claim_id).order_by(StatusHistory.id))]
+@app.get(
+    "/claims/{claim_id}/history",
+    tags=["workflow"],
+)
+def get_claim_history(
+    claim_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    get_visible_claim(db, claim_id, user)
+
+    rows = db.scalars(
+        select(StatusHistory)
+        .where(StatusHistory.claim_id == claim_id)
+        .order_by(StatusHistory.id)
+    )
+
+    return [
+        {
+            "id": row.id,
+            "old_status": row.old_status,
+            "new_status": row.new_status,
+            "justification": row.justification,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
 
 
-@app.post("/claims/{claim_id}/notes", tags=["notes"])
-def add_note(claim_id: int, data: NoteIn, db: Session = Depends(get_db),
-             user: User = Depends(require("admin", "reviewer", "adjuster"))):
-    visible(db, claim_id, user)
-    note = Note(claim_id=claim_id, author_id=user.id, text=data.text)
+@app.post(
+    "/claims/{claim_id}/notes",
+    status_code=201,
+    tags=["notes"],
+)
+def add_claim_note(
+    claim_id: int,
+    data: NoteCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("admin", "reviewer", "adjuster")),
+):
+    get_visible_claim(db, claim_id, user)
+
+    note_text = data.text.strip()
+
+    if not note_text:
+        raise HTTPException(
+            status_code=422,
+            detail="Note cannot be blank",
+        )
+
+    note = Note(
+        claim_id=claim_id,
+        author_id=user.id,
+        text=note_text,
+    )
+
     db.add(note)
-    log(db, user, "add_note", "claim")
+    add_audit(db, user, "add_note", "claim")
+
     db.commit()
     db.refresh(note)
-    return {"id": note.id, "text": note.text}
+
+    return {
+        "id": note.id,
+        "claim_id": note.claim_id,
+        "author_id": note.author_id,
+        "text": note.text,
+        "created_at": note.created_at,
+    }
 
 
-@app.get("/claims/{claim_id}/notes", tags=["notes"])
-def notes(claim_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    visible(db, claim_id, user)
-    return [{"id": n.id, "text": n.text} for n in db.scalars(select(Note).where(Note.claim_id == claim_id))]
+@app.get(
+    "/claims/{claim_id}/notes",
+    tags=["notes"],
+)
+def list_claim_notes(
+    claim_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    get_visible_claim(db, claim_id, user)
+
+    rows = db.scalars(
+        select(Note)
+        .where(Note.claim_id == claim_id)
+        .order_by(Note.id)
+    )
+
+    return [
+        {
+            "id": row.id,
+            "claim_id": row.claim_id,
+            "author_id": row.author_id,
+            "text": row.text,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
 
 
-@app.post("/documents", tags=["documents"])
-def upload(file: UploadFile = File(...), claim_id: int | None = Form(None),
-           db: Session = Depends(get_db), user: User = Depends(require("admin", "reviewer", "adjuster"))):
-    if claim_id is not None:
-        visible(db, claim_id, user)
-    name = (file.filename or "").replace("\\", "/").split("/")[-1]
-    extension = name.lower().rsplit(".", 1)[-1] if "." in name else ""
-    if extension not in {"pdf", "txt"}:
-        raise HTTPException(415, "Only PDF and TXT supported")
-    content = file.file.read(5_000_001)
-    if len(content) > 5_000_000:
-        raise HTTPException(413, "File too large")
-    if extension == "pdf" and not content.startswith(b"%PDF-"):
-        raise HTTPException(422, "Invalid PDF")
-    try:
-        text = (PdfReader(io.BytesIO(content)).pages if extension == "pdf" else None)
-        extracted = "\n".join(page.extract_text() or "" for page in text) if text is not None else content.decode("utf-8")
-    except Exception as exc:
-        raise HTTPException(422, "Cannot extract document text") from exc
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    storage = uuid.uuid4().hex + "." + extension
-    path = UPLOAD_DIR / storage
-    try:
-        path.write_bytes(content)
-        doc = Document(filename=name[:255], storage_name=storage, claim_id=claim_id)
-        db.add(doc)
-        db.flush()
-        for index, start in enumerate(range(0, min(len(extracted), 100_000), 1000)):
-            db.add(Chunk(document_id=doc.id, ordinal=index, text=extracted[start:start + 1000]))
-        log(db, user, "upload", "document")
-        db.commit()
-        return {"id": doc.id, "chunks": min((len(extracted) + 999) // 1000, 100)}
-    except Exception:
-        db.rollback()
-        path.unlink(missing_ok=True)
-        raise
+@app.get(
+    "/analytics/summary",
+    tags=["analytics"],
+)
+def analytics_summary(
+    db: Session = Depends(get_db),
+    user: User = Depends(require("admin", "reviewer")),
+):
+    claims = list(db.scalars(select(Claim)))
+    now = utc_now()
+    sla_target = timedelta(hours=SLA_TARGET_HOURS)
 
+    by_status = Counter(claim.status for claim in claims)
+    total_amount = sum((claim.amount or 0) for claim in claims)
+    assigned_claims = sum(claim.assigned_to is not None for claim in claims)
 
-@app.get("/documents", tags=["documents"])
-def documents(db: Session = Depends(get_db), user: User = Depends(require("admin", "reviewer", "adjuster"))):
-    rows = []
-    for doc in db.scalars(select(Document)):
-        claim = db.get(Claim, doc.claim_id) if doc.claim_id is not None else None
-        if user.role == "adjuster" and claim is not None and claim.assigned_to != user.id:
-            continue
-        rows.append({"id": doc.id, "filename": doc.filename, "active": doc.active, "approved": doc.approved})
-    return rows
+    claim_tats = []
+    adjuster_tats = []
+    sla_met = 0
+    sla_breached = 0
+    overdue_open_claims = 0
+    closed_claims = 0
+    adjuster_workload = {}
 
+    # Use status history to retain the original decision after a claim is closed.
+    # A closed claim may have been either approved or denied.
+    decision_by_claim_id = {}
+    history_rows = db.scalars(
+        select(StatusHistory).order_by(StatusHistory.id)
+    ).all()
 
-@app.get("/documents/{document_id}/download", tags=["documents"])
-def download(document_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    doc = db.get(Document, document_id)
-    if doc is None:
-        raise HTTPException(404, "Document not found")
-    if doc.claim_id is not None:
-        visible(db, doc.claim_id, user)
-    elif user.role == "customer":
-        raise HTTPException(403, "Not authorized")
-    path = UPLOAD_DIR / doc.storage_name
-    if not path.is_file():
-        raise HTTPException(404, "File missing")
-    return FileResponse(path, filename=doc.filename)
+    for history in history_rows:
+        if (
+            history.claim_id not in decision_by_claim_id
+            and history.new_status in {"approved", "denied"}
+        ):
+            decision_by_claim_id[history.claim_id] = history.new_status
 
+    # Fallback for existing records that have no decision history.
+    for claim in claims:
+        if claim.id not in decision_by_claim_id and claim.status in {"approved", "denied"}:
+            decision_by_claim_id[claim.id] = claim.status
 
-@app.patch("/documents/{document_id}", tags=["documents"])
-def set_document(document_id: int, data: DocumentState, db: Session = Depends(get_db),
-                 user: User = Depends(require("admin", "reviewer"))):
-    doc = db.get(Document, document_id)
-    if doc is None:
-        raise HTTPException(404, "Document not found")
-    doc.active, doc.approved = data.active, data.approved
-    log(db, user, "set_document", "document")
-    db.commit()
-    return {"id": doc.id, "active": doc.active, "approved": doc.approved}
+    approved_claims = sum(
+        decision == "approved" for decision in decision_by_claim_id.values()
+    )
+    rejected_claims = sum(
+        decision == "denied" for decision in decision_by_claim_id.values()
+    )
+    decided_claim_count = approved_claims + rejected_claims
 
+    approval_rate = (
+        round(approved_claims / decided_claim_count * 100, 2)
+        if decided_claim_count else 0.0
+    )
+    rejection_rate = (
+        round(rejected_claims / decided_claim_count * 100, 2)
+        if decided_claim_count else 0.0
+    )
 
-STOP = {"what", "where", "which", "with", "from", "this", "that", "about", "does", "have", "the", "and", "for", "are", "can"}
+    for claim in claims:
+        created = normalize_datetime(claim.created_at)
+        assigned = normalize_datetime(claim.assigned_at)
+        decision = normalize_datetime(claim.decision_at)
 
+        deadline = created + sla_target if created is not None else None
 
-def terms(text: str) -> set[str]:
-    return {x for x in re.findall(r"[a-z0-9]{3,}", text.lower()) if x not in STOP}
+        # Claim TAT and 48-hour SLA: submission -> approval/denial decision.
+        if created is not None and decision is not None:
+            tat_hours = (decision - created).total_seconds() / 3600
+            claim_tats.append(tat_hours)
 
+            if tat_hours <= SLA_TARGET_HOURS:
+                sla_met += 1
+            else:
+                sla_breached += 1
 
-@app.post("/rag/ask", tags=["rag"])
-def ask(data: Question, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    query = terms(data.question)
-    results = []
-    for chunk, doc in db.execute(select(Chunk, Document).join(Document).where(Document.active.is_(True), Document.approved.is_(True))):
-        if doc.claim_id is not None:
-            try:
-                visible(db, doc.claim_id, user)
-            except HTTPException:
-                continue
-        score = len(query & terms(chunk.text))
-        if score:
-            results.append((score, chunk, doc))
-    results.sort(key=lambda row: (-row[0], row[1].id))
-    if not results:
-        return {"answer": "No matching approved source found.", "citations": []}
-    citations = [{"document_id": doc.id, "chunk_id": chunk.id, "filename": doc.filename}
-                 for _, chunk, doc in results[:3]]
-    answer = " ".join(chunk.text[:400] for _, chunk, _ in results[:3])
-    return {"answer": answer + " " + " ".join(f"[document:{c['document_id']}:chunk:{c['chunk_id']}]" for c in citations),
-            "citations": citations}
+        # Only unresolved claims in these statuses count as overdue.
+        elif (
+            claim.status in {"submitted", "under_review"}
+            and deadline is not None
+            and now > deadline
+        ):
+            overdue_open_claims += 1
 
+        # Adjuster TAT: latest assignment -> approval/denial decision.
+        if (
+            assigned is not None
+            and decision is not None
+            and decision >= assigned
+        ):
+            adjuster_tats.append(
+                (decision - assigned).total_seconds() / 3600
+            )
 
-@app.get("/analytics/summary", tags=["analytics"])
-def analytics(db: Session = Depends(get_db), user: User = Depends(require("admin", "reviewer"))):
-    frame = pd.DataFrame([{"status": c.status, "amount": c.amount, "assigned": c.assigned_to is not None}
-                          for c in db.scalars(select(Claim))])
-    if frame.empty:
-        return {"total_claims": 0, "by_status": {}, "total_amount": 0, "average_amount": 0, "assigned_claims": 0}
-    return {"total_claims": int(len(frame)), "by_status": {str(k): int(v) for k, v in Counter(frame.status).items()},
-            "total_amount": int(frame.amount.sum()), "average_amount": float(frame.amount.mean()),
-            "assigned_claims": int(frame.assigned.sum())}
+        if claim.status == "closed":
+            closed_claims += 1
+
+        # Workload per currently assigned adjuster.
+        if claim.assigned_to is not None:
+            adjuster_id = str(claim.assigned_to)
+            stats = adjuster_workload.setdefault(
+                adjuster_id,
+                {
+                    "assigned_claims": 0,
+                    "open_claims": 0,
+                    "closed_claims": 0,
+                },
+            )
+            stats["assigned_claims"] += 1
+            if claim.status == "closed":
+                stats["closed_claims"] += 1
+            elif claim.status in {"submitted", "under_review", "approved", "denied"}:
+                stats["open_claims"] += 1
+
+    return {
+        "total_claims": len(claims),
+        "by_status": dict(by_status),
+        "total_amount": total_amount,
+        "average_amount": total_amount / len(claims) if claims else 0.0,
+        "assigned_claims": assigned_claims,
+        "unassigned_claims": len(claims) - assigned_claims,
+        "sla_target_hours": SLA_TARGET_HOURS,
+        "closed_claims": closed_claims,
+        "decided_claims": decided_claim_count,
+        "approved_claims": approved_claims,
+        "rejected_claims": rejected_claims,
+        "approval_rate_percent": approval_rate,
+        "rejection_rate_percent": rejection_rate,
+        "sla_met": sla_met,
+        "sla_breached": sla_breached,
+        "overdue_open_claims": overdue_open_claims,
+        "average_claim_tat_hours": (
+            round(sum(claim_tats) / len(claim_tats), 2) if claim_tats else None
+        ),
+        "average_adjuster_tat_hours": (
+            round(sum(adjuster_tats) / len(adjuster_tats), 2)
+            if adjuster_tats else None
+        ),
+        "adjuster_workload": adjuster_workload,
+    }
 
 
 @app.get("/audit", tags=["audit"])
-def audit(db: Session = Depends(get_db), user: User = Depends(require("admin"))):
-    return [{"id": a.id, "actor_id": a.actor_id, "action": a.action, "resource": a.resource}
-            for a in db.scalars(select(Audit).order_by(Audit.id.desc()).limit(100))]
+def list_audit_logs(
+    db: Session = Depends(get_db),
+    user: User = Depends(require("admin")),
+):
+    rows = db.scalars(
+        select(Audit)
+        .order_by(Audit.id.desc())
+        .limit(100)
+    )
+
+    return [
+        {
+            "id": row.id,
+            "actor_id": row.actor_id,
+            "action": row.action,
+            "resource": row.resource,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]

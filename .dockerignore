@@ -1,0 +1,12 @@
+.env
+.env.*
+.git
+.venv
+.pytest_cache
+__pycache__
+**/__pycache__
+*.py[cod]
+tests
+documents_to_Upload
+*.pptx
+*.docx

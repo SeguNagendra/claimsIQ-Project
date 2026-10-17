@@ -1,0 +1,108 @@
+ClaimIQ — Client Demo Scenario
+1. Claim details
+Hospitalization Claim
+Under Review
+
+
+Claim type
+Medical / Hospitalization
+
+Claimed amount
+₹25,000
+
+Reason for claim
+Hospitalization for fever and viral infection, including doctor consultation, diagnostic tests, medicines, and treatment.
+
+Note: The claim ID and exact status-transition justification should be taken from the live application if you want to display them during the demo.
+
+2. Claim workflow demonstrated
+1. Customer login
+   Logged in through Swagger using the customer authentication API.
+2. Create a claim
+   Created the hospitalization claim for ₹25,000 with the fever and viral infection description.
+3. Assign an adjuster
+   Assigned the claim to an adjuster for assessment.
+4. Update claim status
+   Changed the claim status to UNDER_REVIEW and provided a justification for the transition.
+5. Add adjuster comments
+   Added an adjuster note to the claim. The exact note text is not available in the current conversation, so retrieve it from the claim history before quoting it to the client.
+6. Ask the AI assistant
+   Used the policy-document RAG functionality to ask what evidence and policy conditions should be checked for this hospitalization claim.
+3. Status-transition justification
+The claim was moved to UNDER_REVIEW for further assessment. For the client demo, explain that the adjuster needs to validate the medical evidence and policy coverage before a decision is made.
+Do not present the explanation above as the exact justification saved in the database; the original text has not been recovered.
+4. Adjuster review checklist
+For this scenario, the adjuster can assess the following:
+- Itemized hospital bill and proof of payment.
+- Discharge summary and hospitalization details.
+- Doctor's prescriptions and treatment records.
+- Diagnostic reports supporting the fever and viral infection diagnosis.
+- Policy validity, coverage limits, and waiting periods.
+- Applicable exclusions and any required pre-authorization.
+These are review points for the scenario, not a confirmation that the claim is approved or that every item is required under the actual policy.
+5. Exact AI/RAG question searched
+What documents should the adjuster verify to assess this hospitalization claim for fever and viral infection, and what policy conditions or exclusions should be checked before approving the claimed amount of ₹25,000?
+ Copy AI question
+6. Suggested client-demo narration
+We created a hospitalization claim for ₹25,000 for a customer who received treatment for fever and a viral infection. After creating the claim, we assigned it to an adjuster, moved it to Under Review with a justification, and added an adjuster note.
+We then used ClaimIQ's AI-powered policy search to identify the documents the adjuster should verify and the policy conditions or exclusions that need to be reviewed before making a decision. This demonstrates how ClaimIQ combines claim workflow management with AI-assisted policy information retrieval.
+The claim remains under review; the AI response supports the assessment process and does not automatically approve the claim.
+
+
+
+
+Before the demo: Open the claim's details or history in Swagger to capture the exact claim ID, saved justification, and adjuster note. Those three values are not available in the current conversation, and I don't want to invent them.
+
+
+
+
+
+
+
+
+
+
+
+
+
+docker run -d --name claimiq-postgres -e POSTGRES_USER=claimiq_local -e POSTGRES_PASSWORD=ClaimIQLocal123 -e POSTGRES_DB=claimiq -p 5433:5432 postgres:17-alpine
+
+docker exec -it claimiq-postgres psql -U claimiq_local -d claimiq
+
+SELECT current_database();
+
+SELECT current_user;
+
+\l   # lis of dbs
+
+\dt
+
+SELECT * FROM table_name;
+
+
+uvicorn app.main:app
+
+
+	
+Response body
+Download
+{
+  "id": 2,
+  "policy_id": 3,
+  "owner_id": 11,
+  "assigned_to": 5,
+  "description": "Hospitalization for fever and viral infection, including doctor consultation, diagnostic tests, prescribed medicines, and hospital treatment expenses.",
+  "amount": 25000,
+  "status": "submitted"
+}
+
+
+{
+  "document_id": "1d5a886b-99d8-444c-9964-8b9273673896",
+  "status": "UPLOADED"
+}
+
+python -m app.init_db
+
+
+What documents should the adjuster verify to assess this hospitalization claim for fever and viral infection, and what policy conditions or exclusions should be checked before approving the claimed amount of ₹25,000?
