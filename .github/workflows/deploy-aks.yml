@@ -86,7 +86,7 @@ jobs:
       - name: Configure kubectl
         run: |
           az aks get-credentials \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --resource-group "hm18-rg" \
             --name "${{ vars.AKS_CLUSTER_NAME }}" \
             --overwrite-existing
       - name: Create namespace and application secrets

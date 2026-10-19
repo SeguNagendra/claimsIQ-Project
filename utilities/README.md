@@ -32,15 +32,18 @@ administrator already exists, its password is left unchanged.
 ## Azure resources required before deployment
 
 Create these resources in the target Azure subscription before running the
-workflow:
+workflow. Use the resource group name `hm18-rg` (create it first if it does not
+exist):
 
-- An Azure Container Registry (ACR).
-- An AKS cluster with permission to pull images from that ACR. Attach the
+- An Azure Container Registry (ACR), for example `claimiqhm18acr` (ACR names
+   must be globally unique and contain only lowercase letters and numbers).
+- An AKS cluster, for example `claimiq-hm18-aks`, with permission to pull images
+   from that ACR. Attach the
   registry to the cluster once, for example:
 
   ```sh
-  az aks update --resource-group <resource-group> --name <cluster-name> \
-    --attach-acr <registry-name>
+   az aks update --resource-group hm18-rg --name claimiq-hm18-aks \
+      --attach-acr claimiqhm18acr
   ```
 
 - A default AKS StorageClass that supports `ReadWriteOnce` Azure disk claims.
@@ -60,9 +63,12 @@ in-cluster PostgreSQL database, and deploys both services.
 
 Set these repository **Variables**:
 
-- `ACR_NAME`: ACR name without `.azurecr.io`.
-- `AZURE_RESOURCE_GROUP`: resource group containing AKS.
-- `AKS_CLUSTER_NAME`: AKS cluster name.
+- `ACR_NAME`: ACR name without `.azurecr.io` (suggested: `claimiqhm18acr`).
+- `AKS_CLUSTER_NAME`: AKS cluster name (suggested: `claimiq-hm18-aks`).
+
+The workflow uses the resource group `hm18-rg` directly; do not add a separate
+resource-group variable. Replace the suggested ACR/AKS names with the names you
+actually create and keep the workflow variables in sync.
 
 Set these repository **Secrets**:
 

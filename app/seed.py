@@ -1,3 +1,5 @@
+import os
+
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
@@ -27,6 +29,12 @@ def customer_username_for_policy(policy_number_index: int) -> str:
 
 def seed_database(db: Session) -> None:
     """Insert demo users, owned policies, and one workflow-consistent claim."""
+    demo_password = os.getenv("CLAIMIQ_DEMO_PASSWORD")
+    if not demo_password:
+        raise RuntimeError(
+            "Set CLAIMIQ_DEMO_PASSWORD in .env before creating demo users."
+        )
+
     for username, role in DEMO_USERS.items():
         existing_user = db.scalar(select(User).where(User.username == username))
         if existing_user is None:
@@ -34,7 +42,7 @@ def seed_database(db: Session) -> None:
                 User(
                     username=username,
                     role=role,
-                    password_hash=hash_password("demo123"),
+                    password_hash=hash_password(demo_password),
                     active=True,
                 )
             )

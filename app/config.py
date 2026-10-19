@@ -1,10 +1,21 @@
 import os
+import secrets
 from pathlib import Path
 from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/claimiq")
-JWT_SECRET = os.getenv("JWT_SECRET", "local-only-change-this-secret-change-me")
+DATABASE_URL = os.getenv(
+	"DATABASE_URL",
+	"postgresql+psycopg2://claimiq:YOUR_DATABASE_PASSWORD@127.0.0.1:5432/claimiq",
+)
+# Never use the visible template placeholder as a signing key. Set JWT_SECRET
+# in .env or the deployment environment to keep tokens valid across restarts.
+_configured_jwt_secret = os.getenv("JWT_SECRET", "")
+JWT_SECRET = (
+	_configured_jwt_secret
+	if _configured_jwt_secret and not _configured_jwt_secret.startswith("YOUR_")
+	else secrets.token_urlsafe(32)
+)
 ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "120"))
 AZURE_STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "")
 AZURE_STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "policy-documents")

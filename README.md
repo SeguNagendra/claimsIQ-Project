@@ -76,7 +76,7 @@ CREATE DATABASE claimiq;
 If you prefer to use a dedicated database user, create that role and make it the database owner. Use your own password:
 
 ```sql
-CREATE ROLE claimiq_local LOGIN PASSWORD 'choose-a-local-password';
+CREATE ROLE claimiq_local LOGIN PASSWORD 'YOUR_DATABASE_PASSWORD';
 ALTER DATABASE claimiq OWNER TO claimiq_local;
 ```
 
@@ -89,12 +89,17 @@ Copy `.env.example` to `.env` in the project root. Update `DATABASE_URL` with yo
 Example if PostgreSQL is published on port 5433:
 
 ```env
-DATABASE_URL=postgresql+psycopg2://claimiq_local:choose-a-local-password@127.0.0.1:5433/claimiq
-JWT_SECRET=use-a-long-random-local-secret
+DATABASE_URL=postgresql+psycopg2://claimiq_local:YOUR_DATABASE_PASSWORD@127.0.0.1:5433/claimiq
+JWT_SECRET=YOUR_LONG_RANDOM_JWT_SECRET_REPLACE_WITH_AT_LEAST_32_RANDOM_CHARACTERS
 ACCESS_TOKEN_MINUTES=120
+CLAIMIQ_DEMO_PASSWORD=YOUR_UNIQUE_DEMO_USER_PASSWORD
 ```
 
 URL-encode special characters in the database password (for example, `@` as `%40`) or choose a local password without URL-reserved characters for this development setup.
+
+Set `CLAIMIQ_DEMO_PASSWORD` in `.env` before running the local database seeder;
+it is used for generated demo accounts. Use a unique password and do not reuse
+it in production.
 
 ## 4. Create a Python virtual environment and install dependencies
 

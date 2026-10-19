@@ -42,11 +42,12 @@ This downloads PostgreSQL 17 with Alpine Linux. Alpine is a small Linux base ima
 
 The following commands create a Docker volume for persistent database files and start PostgreSQL with a database named `claimiq`. They publish port 5433 on your Windows computer and forward it to port 5432 inside the container.
 
-Use a local demo password and keep it consistent with the `DATABASE_URL` in Step 5.
+Choose a unique local PostgreSQL password and use the same value in the
+`DATABASE_URL` in Step 5. Replace the placeholder before running this command.
 
 ```powershell
 docker volume create claimiq_pgdata
-docker run --name claimiq-postgres --detach --restart unless-stopped --publish 5433:5432 --env POSTGRES_DB=claimiq --env POSTGRES_USER=claimiq_local --env POSTGRES_PASSWORD=ClaimIQLocal123 --volume claimiq_pgdata:/var/lib/postgresql/data postgres:17-alpine
+docker run --name claimiq-postgres --detach --restart unless-stopped --publish 5433:5432 --env POSTGRES_DB=claimiq --env POSTGRES_USER=claimiq_local --env POSTGRES_PASSWORD=YOUR_LOCAL_POSTGRES_PASSWORD --volume claimiq_pgdata:/var/lib/postgresql/data postgres:17-alpine
 ```
 
 If Docker says a container named `claimiq-postgres` already exists, do not run `docker run` again. Start the existing container:
@@ -108,10 +109,15 @@ notepad .env
 Set the database values to match Step 3. For the commands above, the local database entries should be:
 
 ```env
-DATABASE_URL=postgresql+psycopg2://claimiq_local:ClaimIQLocal123@127.0.0.1:5433/claimiq
-JWT_SECRET=replace-with-a-long-random-local-secret
+DATABASE_URL=postgresql+psycopg2://claimiq_local:YOUR_LOCAL_POSTGRES_PASSWORD@127.0.0.1:5433/claimiq
+JWT_SECRET=YOUR_LONG_RANDOM_JWT_SECRET_REPLACE_WITH_AT_LEAST_32_RANDOM_CHARACTERS
 ACCESS_TOKEN_MINUTES=120
+CLAIMIQ_DEMO_PASSWORD=YOUR_UNIQUE_DEMO_USER_PASSWORD
 ```
+
+Replace the database password with the same value used when starting
+PostgreSQL. `CLAIMIQ_DEMO_PASSWORD` sets the password for accounts created by
+the local demo-data seeder.
 
 Do not paste the example JWT secret into a production deployment. If your database password contains URL-special characters such as `@`, `:`, `/`, or `#`, URL-encode them in `DATABASE_URL`.
 

@@ -65,7 +65,7 @@ Before the demo: Open the claim's details or history in Swagger to capture the e
 
 
 
-docker run -d --name claimiq-postgres -e POSTGRES_USER=claimiq_local -e POSTGRES_PASSWORD=ClaimIQLocal123 -e POSTGRES_DB=claimiq -p 5433:5432 postgres:17-alpine
+docker run -d --name claimiq-postgres -e POSTGRES_USER=claimiq_local -e POSTGRES_PASSWORD=YOUR_LOCAL_POSTGRES_PASSWORD -e POSTGRES_DB=claimiq -p 5433:5432 postgres:17-alpine
 
 docker exec -it claimiq-postgres psql -U claimiq_local -d claimiq
 
