@@ -1,0 +1,217 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudguard
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudguard-config
+  namespace: cloudguard
+data:
+  APP_NAME: CloudGuard
+  APP_ENV: production
+  API_PREFIX: /api/v1
+  JWT_EXPIRE_MINUTES: "60"
+  AZURE_SUBSCRIPTION_ID: ""
+  AZURE_CLIENT_ID: ""
+  CLOUDGUARD_AZURE_MOCK: "false"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: cloudguard
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: cloudguard
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudguard-api
+  namespace: cloudguard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cloudguard-api
+  template:
+    metadata:
+      labels:
+        app: cloudguard-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: api
+          image: cloudguard-api:dev
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: cloudguard-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: DATABASE_URL
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: JWT_SECRET_KEY
+            - name: SEED_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: SEED_ADMIN_USERNAME
+            - name: SEED_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: SEED_ADMIN_PASSWORD
+            - name: SEED_ENGINEER_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: SEED_ENGINEER_USERNAME
+            - name: SEED_ENGINEER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: SEED_ENGINEER_PASSWORD
+            - name: SEED_SECURITY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: SEED_SECURITY_USERNAME
+            - name: SEED_SECURITY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloudguard-secrets
+                  key: SEED_SECURITY_PASSWORD
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudguard-api
+  namespace: cloudguard
+spec:
+  type: LoadBalancer
+  selector:
+    app: cloudguard-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
