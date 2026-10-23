@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudguard-phase1"
+version = "0.1.0"
+description = "CloudGuard Phase 1 Azure VM tag and NSG compliance scanner"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

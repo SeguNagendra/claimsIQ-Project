@@ -1,243 +1,188 @@
-# ClaimIQ — Claims, Analytics, Document Management and RAG
+# CloudGuard — Phase 1 (local Swagger testing)
 
-This project includes the Claims Management module, Analytics, Document Management, and Azure-backed RAG policy Q&A.
+This package implements the agreed Phase 1 scope:
+- FastAPI application, run directly with Python.
+- PostgreSQL runs as a Docker container.
+- Database tables and initial records are created automatically on application startup.
+- JWT login and role-based access control.
+- Azure VM `Environment` tag policy: if missing, add `Environment=dev` automatically.
+- NSG inbound source `0.0.0.0/0` policy: create a high-severity finding and require Security Officer approval before remediation.
+- Unit tests for policy evaluation and JWT/password utilities.
+- Azure access via a User-Assigned Managed Identity (UAMI).
 
-The FastAPI backend and Streamlit dashboard can run locally or as Docker
-containers. PostgreSQL runs in a Docker container for local use and in a
-persistent StatefulSet inside AKS for deployment; no Azure Database for
-PostgreSQL instance is used. See [utilities/README.md](utilities/README.md)
-for Compose and GitHub Actions deployment instructions.
+## Important managed identity limitation
 
-## Included modules
+A UAMI can only be used by an application running in an Azure environment where that UAMI is attached and available through the managed identity endpoint. Creating a UAMI in Azure does **not** make it usable by a Python process running directly on your Windows laptop.
 
-- Authentication using JWT bearer tokens
-- Role-based access control: `admin`, `reviewer`, `adjuster`, `customer`
-- User listing for authorized roles
-- Policy creation and listing
-- Claim submission and retrieval
-- Adjuster assignment
-- Claim status workflow and append-only status history
-- Claim notes
-- Pandas-based analytics summary
-- Audit log for key actions
-- Automated unit/API tests using an isolated in-memory SQLite database
+For real Azure scans with UAMI, run the Python application on an Azure VM with the UAMI attached. You can open Swagger locally through an SSH tunnel. For offline code testing on a laptop, set `CLOUDGUARD_AZURE_MOCK=true`; mock mode does not contact or modify Azure.
 
-## Folder structure
+## Prerequisites
 
-```text
-claimiq-claims-local/
-├── app/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── database.py
-│   ├── init_db.py
-│   ├── models.py
-│   ├── schemas.py
-│   ├── security.py
-│   ├── seed.py
-│   └── main.py
-├── tests/
-│   ├── conftest.py
-│   └── test_api.py
-├── .env.example
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
+- Python 3.11+
+- Docker Desktop (Windows) or Docker Engine
+- Azure CLI for provisioning Azure resources
+- An Azure subscription and permission to assign RBAC roles / attach a UAMI
+- For live Azure operations: an Azure VM with the UAMI attached and appropriate RBAC permissions
 
-## 1. Check your existing PostgreSQL container
+## 1. Extract and configure
 
-In PowerShell or a terminal:
-
-```bash
-docker ps
-```
-
-Find the PostgreSQL container and check its `PORTS` value. If it shows `127.0.0.1:5433->5432/tcp`, connect to host port `5433`. If it shows `0.0.0.0:5432->5432/tcp`, use host port `5432`.
-
-Your container must publish a port to the host for the locally running Python process to connect to it.
-
-## 2. Create the application database
-
-If you have already created a `claimiq` database, keep using it; do not drop it. Otherwise, connect to the PostgreSQL container and create the database.
-
-Example command (replace container name, host port and credentials with yours):
-
-```bash
-docker exec -it <your-postgres-container-name> psql -U postgres -d postgres
-```
-
-At the `psql` prompt, create the database only if it does not already exist:
-
-```sql
-CREATE DATABASE claimiq;
-```
-
-If you prefer to use a dedicated database user, create that role and make it the database owner. Use your own password:
-
-```sql
-CREATE ROLE claimiq_local LOGIN PASSWORD 'choose-a-local-password';
-ALTER DATABASE claimiq OWNER TO claimiq_local;
-```
-
-If the role already exists, do not recreate it. Exit `psql` with `\q`.
-
-## 3. Create `.env`
-
-Copy `.env.example` to `.env` in the project root. Update `DATABASE_URL` with your actual database username, password, and published host port.
-
-Example if PostgreSQL is published on port 5433:
-
-```env
-DATABASE_URL=postgresql+psycopg2://claimiq_local:choose-a-local-password@127.0.0.1:5433/claimiq
-JWT_SECRET=use-a-long-random-local-secret
-ACCESS_TOKEN_MINUTES=120
-```
-
-URL-encode special characters in the database password (for example, `@` as `%40`) or choose a local password without URL-reserved characters for this development setup.
-
-## 4. Create a Python virtual environment and install dependencies
-
-Run these commands from the `claimiq-claims-local` project root.
-
-### Windows PowerShell
+Open PowerShell in the extracted `cloudguard_phase1` folder:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-If PowerShell blocks activation, run this in that terminal and activate again:
+Edit `.env`. Set:
+- `DATABASE_URL` to match the PostgreSQL password in `docker-compose.yml` / `POSTGRES_PASSWORD`.
+- `JWT_SECRET_KEY` to a long random secret.
+- `AZURE_SUBSCRIPTION_ID` to the subscription you intend to scan.
+- `AZURE_CLIENT_ID` to the UAMI **client ID**, not its resource ID or principal/object ID.
+- `CLOUDGUARD_AZURE_MOCK=false` for live Azure access, or `true` for offline mock testing.
+
+Set the same DB password in `.env` and the Compose environment. Example default for a quick dev-only start:
+`DATABASE_URL=postgresql+psycopg://cloudguard:ChangeThisDbPassword@localhost:5432/cloudguard`
+and `POSTGRES_PASSWORD=ChangeThisDbPassword`.
+
+Change the three seed passwords in `.env` before running outside a disposable development environment.
+
+## 2. Start PostgreSQL (pulls image automatically)
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+docker compose up -d postgres
+docker compose ps
+docker compose logs postgres
+```
+
+Compose pulls `postgres:16-alpine` if it is not already available. Persistent data is stored in the `cloudguard_pgdata` Docker volume.
+
+## 3. Create Python environment and install packages
+
+```powershell
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-If `.env` already exists, do not overwrite it; edit its `DATABASE_URL` instead.
-
-### Linux/macOS
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-cp .env.example .env
-```
-
-Edit `.env`, then install packages:
-
-```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## 5. Create tables and demo data
+On Linux, use `python3 -m venv .venv` and `source .venv/bin/activate`.
 
-From the project root with the virtual environment active:
+## 4. One-click DB/table initialization and start API
+
+There is no separate table-creation command. Starting the API creates missing tables and seeds the initial users and policies automatically:
+
+```powershell
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Open <http://127.0.0.1:8000/docs>.
+
+If the database connection fails, verify that `DATABASE_URL` credentials match `POSTGRES_PASSWORD` and that the container is healthy.
+
+## 5. Development-only offline test (no Azure calls)
+
+For laptop-only API / mock-scan testing, set this in `.env`:
+
+```dotenv
+CLOUDGUARD_AZURE_MOCK=true
+```
+
+Keep a valid-looking `AZURE_SUBSCRIPTION_ID` value. Restart Uvicorn after changing `.env`. In mock mode, the scan returns two sample VMs and one sample NSG finding; it does not change Azure. Register that subscription in Swagger before scanning.
+
+## 6. Provision a UAMI for live Azure access
+
+Run from an account allowed to create identities and assign roles. Replace the placeholders:
+
+```powershell
+az login
+az account set --subscription "<SUBSCRIPTION_ID>"
+az identity create --resource-group "<IDENTITY_RESOURCE_GROUP>" --name "uami-cloudguard"
+az identity show --resource-group "<IDENTITY_RESOURCE_GROUP>" --name "uami-cloudguard" --query "{clientId:clientId,principalId:principalId,id:id}" -o json
+```
+
+Record:
+- `clientId` -> `AZURE_CLIENT_ID`
+- `principalId` -> RBAC role assignment / identity attachment
+- `id` -> resource ID for attaching the identity to the Azure VM
+
+### Attach the UAMI to the Azure VM running CloudGuard
+
+```powershell
+az vm identity assign --resource-group "<APP_VM_RESOURCE_GROUP>" --name "<APP_VM_NAME>" --identities "<UAMI_RESOURCE_ID>"
+```
+
+The Python app must run on this Azure VM for UAMI authentication. It cannot use the VM's UAMI from a separate Windows laptop.
+
+### Grant least-privilege RBAC
+
+For read-only scanning, Reader at the target subscription scope is the simplest starting point:
+
+```powershell
+az role assignment create --assignee-object-id "<UAMI_PRINCIPAL_ID>" --assignee-principal-type ServicePrincipal --role "Reader" --scope "/subscriptions/<SUBSCRIPTION_ID>"
+```
+
+For VM tag remediation, grant the required tag-write permission at the narrowest applicable scope, for example the target VM or resource group. For approved NSG changes, grant `Network Contributor` only at the target NSG or its resource group scope. Do not grant write permissions at subscription scope unless specifically justified and approved by your organization.
+
+Example role assignment commands (choose the correct target scope):
+```powershell
+az role assignment create --assignee-object-id "<UAMI_PRINCIPAL_ID>" --assignee-principal-type ServicePrincipal --role "Tag Contributor" --scope "<TARGET_VM_RESOURCE_ID>"
+az role assignment create --assignee-object-id "<UAMI_PRINCIPAL_ID>" --assignee-principal-type ServicePrincipal --role "Network Contributor" --scope "<TARGET_NSG_RESOURCE_ID>"
+```
+
+Your account needs permission to create these role assignments. Allow time for RBAC propagation. Validate exact role availability and scope requirements in your Azure environment before applying write permissions.
+
+## 7. Access Swagger locally while the app runs on an Azure VM
+
+For safer testing, bind Uvicorn to loopback on the Azure VM:
 
 ```bash
-python -m app.init_db
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-This creates missing tables and inserts demo accounts and a demo policy/claim only when they do not already exist. It does not drop or reset the database.
+From your local machine, establish an SSH tunnel (replace username and VM public IP/DNS):
 
-Demo users all have password `demo123`:
-
-| Username | Role |
-|---|---|
-| `admin` | admin |
-| `reviewer` | reviewer |
-| `adjuster` | adjuster |
-| `customer` | customer |
-| `customer2` through `customer50` | customer |
-| `adjuster1` through `adjuster5` | adjuster |
-| `support_agent` | support_agent |
-
-Demo users all have password `demo123`. The seed creates policies `POL-0001` through `POL-0050`; each sample policy is assigned to its matching customer account (`POL-0001` belongs to `customer`, `POL-0002` belongs to `customer2`, and so on). New claims are automatically assigned to the active adjuster with the fewest open claims. Demo data and passwords are for local development only.
-
-**Policy ownership:** `POST /policies` is admin-only and requires `number`, `holder`, `owner_id`, and optional `active`. The `owner_id` must identify an active customer. Customers can submit claims only against their own policies. When upgrading an existing local database, `python -m app.init_db` adds the policy-owner column if needed and backfills the known sample policies. Other legacy policies are deliberately left unowned rather than guessing; assign their `owner_id` to the correct customer before accepting claims against them.
-
-## 6. Start the API locally
-
-```bash
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```powershell
+ssh -L 8000:127.0.0.1:8000 <VM_USERNAME>@<VM_PUBLIC_IP_OR_DNS>
 ```
 
-Open Swagger UI:
+Keep the SSH session open, then browse to <http://127.0.0.1:8000/docs> on your laptop. Ensure SSH access is appropriately restricted by your organization. Do not expose the API publicly for this initial test.
 
-- http://127.0.0.1:8000/docs
-- Health endpoint: http://127.0.0.1:8000/health
+## 8. Test in Swagger
 
-In Swagger, click **Authorize** and log in using the `/auth/token` endpoint. The OAuth2 form expects `username` and `password`. After a successful login, Swagger uses the returned bearer token for protected endpoints.
+1. `POST /api/v1/auth/login` with one of the seeded users, e.g. `admin` and the password from `.env`.
+2. Copy `access_token` from the response.
+3. Click **Authorize** in Swagger and enter `Bearer <access_token>` if the UI asks for the full header value.
+4. As Admin, `POST /api/v1/subscriptions` with `name` and `subscription_id`.
+5. `GET /api/v1/policies` to see the two seeded policies.
+6. `POST /api/v1/scans` with the registered `subscription_id`.
+7. `GET /api/v1/findings` to review findings.
+8. Log in as `security` and authorize with that token.
+9. `GET /api/v1/approvals/pending`.
+10. Approve an NSG finding with `POST /api/v1/approvals/findings/{finding_id}/approve`, body such as `{"replacement_source_cidr":"203.0.113.10/32"}`. This CIDR is documentation-only and should **not** be used as a real allowlist; use your approved corporate/VPN IP range for real remediation.
+11. Log in as `admin` and call `GET /api/v1/audit-logs`.
 
-## 7. Suggested Swagger testing sequence
+The approve endpoint both records approval and executes the NSG source change. It rejects `0.0.0.0/0` as a replacement. Do not test live remediation against production resources.
 
-1. `POST /auth/token` — sign in as `admin` or `customer`.
-2. `GET /users/me` — verify the logged-in user and role.
-3. `GET /policies` — list policies.
-4. `GET /users` as admin — find the intended customer's numeric `id`.
-5. `POST /policies` as admin — create a policy with `number`, `holder`, and that customer's `owner_id`.
-6. `POST /claims` as the policy's customer — create a claim using the policy's numeric `id`. A different customer should receive `403`.
-7. `GET /claims` — verify role-based filtering.
-8. `POST /claims/{claim_id}/assignment` as admin/reviewer — assign to the adjuster user ID if reassignment is needed.
-9. `POST /claims/{claim_id}/status` as adjuster — move the claim to `under_review`.
-10. `POST /claims/{claim_id}/status` as reviewer/admin — move it to `approved` or `denied`.
-11. `GET /claims/{claim_id}/history` — verify status history.
-12. `POST /claims/{claim_id}/notes` and `GET /claims/{claim_id}/notes`.
-13. `GET /analytics/summary` as admin/reviewer.
-14. `GET /audit` as admin.
+## 9. Unit tests
 
-Valid workflow:
-
-```text
-submitted -> under_review -> approved -> closed
-                           -> denied ----> closed
+```powershell
+pytest
 ```
 
-An admin may override a transition only by providing a non-empty `justification`. Adjusters cannot make approval/denial decisions.
+The tests cover policy evaluation and password/JWT helpers. Azure calls are not made by these unit tests.
 
-## 8. Run tests
+## Seed accounts (development only)
 
-Tests use an isolated in-memory SQLite database and do **not** connect to, delete, or modify your PostgreSQL database.
+- `admin` — role `ADMIN`
+- `engineer` — role `CLOUD_ENGINEER`
+- `security` — role `SECURITY_OFFICER`
 
-```bash
-python -m pytest -v
-```
+Passwords are set by `SEED_*_PASSWORD` in `.env`. The accounts are created automatically if missing; changing a seed password after the account already exists does not reset that existing account's password.
 
-## Troubleshooting
+## Notes and boundaries
 
-- `connection refused`: check `docker ps`, the container's published port, and the `DATABASE_URL` host port.
-- `password authentication failed`: correct the database credentials in `.env`.
-- `database "claimiq" does not exist`: create the database inside the running PostgreSQL server first.
-- `ModuleNotFoundError`: activate `.venv` and run `pip install -r requirements.txt`.
-- `Address already in use`: use another API port, e.g. `--port 8001`, and open the matching URL.
-
-This is a local development starter, not production deployment configuration. Do not expose it publicly or use demo credentials for real data.
-
-
-## Document Management and RAG
-
-The existing Claims Management and Analytics endpoints remain in place. New endpoints:
-
-- `POST /api/v1/documents` (also available at `/documents`) — Admin uploads a PDF/DOCX using multipart fields `policy_code`, `document_name`, `version`, `effective_from`, optional `replaces_document_id`, and `file`.
-- `POST /api/v1/documents/{document_id}/process` (also `/documents/{document_id}/process`) — Admin extracts text, chunks it, generates Azure OpenAI embeddings, and indexes chunks in Azure AI Search.
-- `GET /api/v1/documents` and `GET /api/v1/documents/{document_id}` (also available unversioned) — authorized operational roles inspect document metadata.
-- `PATCH /api/v1/documents/{document_id}/activation` (also unversioned) — Admin activates/deactivates a processed document; send multipart field `active=true` or `active=false`.
-- `POST /api/v1/ai/query` (also `/ai/query`) — authenticated Admin, Reviewer, Adjuster, or Support Agent asks a policy question. JSON: `{"question":"What is covered?","policy_code":"optional policy code"}`. The response contains an answer, document/page/chunk sources, response time, and status.
-
-### Azure setup
-
-1. Create a private Blob Storage container (default `policy-documents`).
-2. Configure Azure AI Search and Azure OpenAI embedding/chat deployments.
-3. Copy `.env.example` to `.env` and set the Azure endpoints and exact deployment names. Use Microsoft Entra ID or optional keys/connection string.
-4. With Entra ID, run `az login` and grant the identity appropriate Blob data permissions, Search index/document permissions, and `Cognitive Services OpenAI User` on the Azure OpenAI resource.
-5. Install dependencies with `pip install -r requirements.txt`.
-6. Create the vector index with `python -m scripts.create_search_index`.
-7. Create/update database tables with `python -m app.init_db`.
-8. Start the API and use `/docs`.
-
-Uploader/query identities come from the existing JWT, not client-supplied user IDs. Only Admin can upload/process/activate/deactivate documents. Retrieval filters to active chunks. Scanned PDFs without embedded text currently require OCR. Azure configuration is only needed for RAG endpoints; Claims and Analytics do not initialize Azure clients.
+- This is a practical Phase 1 scaffold, not a production-hardened compliance product.
+- NSG scan currently examines NSGs in the registered subscription, not only NSGs attached to VM NICs.
+- Detection is based on enabled inbound `Allow` rules with a source IPv4 prefix of `/0`, including `0.0.0.0/0`.
+- The NSG remediation requires the officer to provide a restricted replacement IPv4 CIDR. CloudGuard cannot safely guess which corporate IP range should be allowed.
+- Email notifications, scheduling, additional resource types, application containerization, Kubernetes, and CI/CD are deferred.
+- The hash-linked audit entries are tamper-evident within the database chain but are not immutable against a database administrator rewriting the whole chain. Production needs protected/externally anchored audit storage.
