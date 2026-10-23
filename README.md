@@ -1,188 +1,379 @@
-# CloudGuard — Phase 1 (local Swagger testing)
+# CloudGuard — Architecture and Codebase Guide
 
-This package implements the agreed Phase 1 scope:
-- FastAPI application, run directly with Python.
-- PostgreSQL runs as a Docker container.
-- Database tables and initial records are created automatically on application startup.
-- JWT login and role-based access control.
-- Azure VM `Environment` tag policy: if missing, add `Environment=dev` automatically.
-- NSG inbound source `0.0.0.0/0` policy: create a high-severity finding and require Security Officer approval before remediation.
-- Unit tests for policy evaluation and JWT/password utilities.
-- Azure access via a User-Assigned Managed Identity (UAMI).
+> **Purpose:** A beginner-friendly explanation of what the CloudGuard Phase 1 code does, how its components fit together, which APIs it exposes, and how its PostgreSQL tables relate. This document describes the code in this repository; it is not a claim that every future/production feature is implemented.
 
-## Important managed identity limitation
+## 1. What is CloudGuard?
 
-A UAMI can only be used by an application running in an Azure environment where that UAMI is attached and available through the managed identity endpoint. Creating a UAMI in Azure does **not** make it usable by a Python process running directly on your Windows laptop.
+CloudGuard is a small Azure infrastructure compliance and remediation API. It checks Azure resources against two seeded policies:
 
-For real Azure scans with UAMI, run the Python application on an Azure VM with the UAMI attached. You can open Swagger locally through an SSH tunnel. For offline code testing on a laptop, set `CLOUDGUARD_AZURE_MOCK=true`; mock mode does not contact or modify Azure.
+1. **Low risk — `VM_REQUIRED_ENVIRONMENT_TAG`:** If a VM does not have the `Environment` tag, CloudGuard attempts to add `Environment=dev`. Existing VM tags are intended to be preserved.
+2. **High risk — `NSG_INBOUND_ANY_IPV4`:** Detects an enabled inbound NSG rule that allows traffic from `0.0.0.0/0`. The finding is marked `PENDING_APPROVAL`. A `SECURITY_OFFICER` or `ADMIN` must approve a restricted replacement CIDR before the API attempts to change the rule.
 
-## Prerequisites
+The application is a **modular monolith**: one FastAPI application/process, split into Python modules by responsibility. It is not a set of independently deployed microservices.
 
-- Python 3.11+
-- Docker Desktop (Windows) or Docker Engine
-- Azure CLI for provisioning Azure resources
-- An Azure subscription and permission to assign RBAC roles / attach a UAMI
-- For live Azure operations: an Azure VM with the UAMI attached and appropriate RBAC permissions
+## 2. Architecture at a glance
 
-## 1. Extract and configure
-
-Open PowerShell in the extracted `cloudguard_phase1` folder:
-
-```powershell
-Copy-Item .env.example .env
+```mermaid
+flowchart TB
+    U[Engineer / Security Officer / Admin] -->|HTTPS in deployed setup; HTTP localhost in dev| SW[Swagger UI / API Client]
+    SW --> API[FastAPI app\napp/main.py]
+    API --> AUTH[JWT Authentication + RBAC\napp/core/security.py + app/api/deps.py]
+    API --> ROUTES[API Routers\nAuth, Subscriptions, Policies, Scans, Findings, Approvals, Audit]
+    ROUTES --> SVC[Services\nScan + Policy Engine + Azure + Audit]
+    ROUTES --> ORM[SQLAlchemy Models / Session]
+    SVC --> AZCLI[Azure SDK + AzureCliCredential]
+    AZCLI --> AZ[Azure Subscription\nVMs + Network Security Groups]
+    ORM --> DB[(PostgreSQL\nCloudGuard metadata, findings, actions, audit)]
+    API --> START[Startup initialization\ncreate DB if missing, tables, seed users/policies]
+    START --> DB
 ```
 
-Edit `.env`. Set:
-- `DATABASE_URL` to match the PostgreSQL password in `docker-compose.yml` / `POSTGRES_PASSWORD`.
-- `JWT_SECRET_KEY` to a long random secret.
-- `AZURE_SUBSCRIPTION_ID` to the subscription you intend to scan.
-- `AZURE_CLIENT_ID` to the UAMI **client ID**, not its resource ID or principal/object ID.
-- `CLOUDGUARD_AZURE_MOCK=false` for live Azure access, or `true` for offline mock testing.
+### Main request flow
 
-Set the same DB password in `.env` and the Compose environment. Example default for a quick dev-only start:
-`DATABASE_URL=postgresql+psycopg://cloudguard:ChangeThisDbPassword@localhost:5432/cloudguard`
-and `POSTGRES_PASSWORD=ChangeThisDbPassword`.
+1. A user calls an API through Swagger or another HTTP client.
+2. Protected endpoints validate the CloudGuard JWT. Role-restricted endpoints also check the user's role.
+3. The route calls the relevant service or database operation.
+4. SQLAlchemy reads/writes CloudGuard records in PostgreSQL.
+5. For a live scan/remediation, `AzureService` uses `AzureCliCredential`, which relies on the Azure CLI session created by `az login`.
+6. The API returns a response. Important operations are recorded in `audit_logs`.
 
-Change the three seed passwords in `.env` before running outside a disposable development environment.
+**Two separate logins exist:** `az login` authenticates the Python Azure SDK to Azure. `POST /api/v1/auth/login` authenticates a user to CloudGuard and returns a JWT for CloudGuard API calls.
 
-## 2. Start PostgreSQL (pulls image automatically)
+## 3. Runtime components
 
-```powershell
-docker compose up -d postgres
-docker compose ps
-docker compose logs postgres
+| Component | Technology | Responsibility |
+|---|---|---|
+| API | FastAPI + Uvicorn | HTTP routes, request validation, Swagger UI |
+| Authentication | `python-jose`, `pwdlib`/Argon2 | JWT creation/validation and password hash verification |
+| Authorization | `app/api/deps.py` | Resolves current user and checks allowed roles |
+| Persistence | SQLAlchemy 2 + psycopg 3 | Maps Python models to PostgreSQL tables |
+| Database | PostgreSQL 16 Alpine in Docker Compose | Stores users, subscriptions, policies, scans, findings, remediation actions, exceptions, audit records |
+| Azure access | Azure SDK + `AzureCliCredential` | Reads VM/NSG data and performs approved changes |
+| Policy evaluation | `app/services/policy_engine.py` | Pure checks for missing tags and broad inbound IPv4 sources |
+| API docs | Swagger UI at `/docs` | Interactive endpoint testing |
+
+## 4. Folder and file structure
+
+```text
+project-root/
+├── app/
+│   ├── main.py
+│   ├── api/
+│   │   ├── deps.py
+│   │   ├── routes_auth.py
+│   │   ├── routes_health.py
+│   │   ├── routes_subscriptions.py
+│   │   ├── routes_policies.py
+│   │   ├── routes_scans.py
+│   │   ├── routes_findings.py
+│   │   ├── routes_approvals.py
+│   │   └── routes_audit.py
+│   ├── core/
+│   │   ├── config.py
+│   │   └── security.py
+│   ├── db/
+│   │   ├── base.py
+│   │   ├── session.py
+│   │   └── init.py
+│   ├── models/
+│   │   ├── user.py
+│   │   ├── subscription.py
+│   │   ├── policy_rule.py
+│   │   ├── scan.py
+│   │   ├── finding.py
+│   │   ├── remediation_action.py
+│   │   ├── exception_record.py
+│   │   └── audit_log.py
+│   ├── schemas/
+│   │   ├── auth.py
+│   │   ├── finding.py
+│   │   ├── policy.py
+│   │   ├── scan.py
+│   │   └── subscription.py
+│   └── services/
+│       ├── azure_service.py
+│       ├── policy_engine.py
+│       ├── scan_service.py
+│       └── audit_service.py
+├── tests/
+│   ├── test_policy_engine.py
+│   └── test_security.py
+├── .env.example
+├── .gitignore
+├── docker-compose.yml
+├── pyproject.toml
+├── requirements.txt
+├── README.md
+├── README.md                    (architecture and codebase guide)
+├── README_RUNBOOK.md            (step-by-step execution guide)
+└── CloudGuard_Architecture.docx (formal architecture document)
 ```
 
-Compose pulls `postgres:16-alpine` if it is not already available. Persistent data is stored in the `cloudguard_pgdata` Docker volume.
+### What each folder does
 
-## 3. Create Python environment and install packages
+- **`app/main.py`** — creates the FastAPI app, runs database initialization at startup, and registers all API routers under `/api/v1`.
+- **`app/api/`** — HTTP endpoint handlers. They parse requests, apply authentication/role dependencies, call services, and return responses.
+  - `deps.py`: reads the bearer token, validates it, loads the active user, and enforces role rules.
+  - `routes_auth.py`: login and token response.
+  - `routes_health.py`: basic health check.
+  - `routes_subscriptions.py`: register/list Azure subscriptions.
+  - `routes_policies.py`: list policies and enable/disable a policy.
+  - `routes_scans.py`: start a scan and retrieve a scan record.
+  - `routes_findings.py`: list findings with optional filters.
+  - `routes_approvals.py`: list pending approvals and approve/execute an NSG remediation.
+  - `routes_audit.py`: retrieve audit entries (Admin only).
+- **`app/core/`** — application settings and security helpers. `config.py` reads `.env`; `security.py` hashes/verifies passwords and creates/decodes JWTs.
+- **`app/db/`** — database connection/session, SQLAlchemy base class, and startup initialization. `init.py` checks/creates the database, creates missing tables, and seeds demo users and two policies.
+- **`app/models/`** — database table definitions. Each model class corresponds to a PostgreSQL table.
+- **`app/schemas/`** — Pydantic request/response shapes used by FastAPI to validate inputs and serialize responses.
+- **`app/services/`** — business logic that should not be mixed into route handlers. `scan_service.py` orchestrates scanning, findings, automatic low-risk remediation, and audit events. `azure_service.py` wraps Azure SDK calls. `policy_engine.py` contains policy predicates. `audit_service.py` creates hash-linked audit entries.
+- **`tests/`** — unit tests for policy predicates and security helpers. These tests do not prove live Azure permissions or real resource remediation.
+- **`docker-compose.yml`** — starts PostgreSQL only; the FastAPI app runs directly in the Python virtual environment for this phase.
+- **`.env.example`** — template of required settings. Copy it to `.env` and edit locally. Never commit real secrets.
+- **`requirements.txt`** — Python dependencies.
+- **`pyproject.toml`** — pytest configuration/project tooling settings.
 
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+## 5. Database design
+
+At startup, `initialize_database()` runs in this order:
+
+1. `ensure_database_exists()` checks whether the database named in `DATABASE_URL` exists. If it does not, it tries to create it; the configured DB account needs the required privilege.
+2. `Base.metadata.create_all()` creates missing tables. It does not migrate or reshape existing tables.
+3. `seed_initial_data()` inserts the three configured users and the two policies only when each username/policy code is not already present.
+
+Changing `SEED_*_PASSWORD` after a user already exists does **not** reset that user's password hash.
+
+### Entity relationship diagram
+
+```mermaid
+erDiagram
+    USERS ||--o{ SCANS : triggers
+    SCANS ||--o{ FINDINGS : produces
+    FINDINGS ||--o{ REMEDIATION_ACTIONS : has
+    USERS o|--o{ REMEDIATION_ACTIONS : requests
+    USERS o|--o{ REMEDIATION_ACTIONS : approves
+    FINDINGS ||--o{ EXCEPTIONS : may_have
+    USERS ||--o{ EXCEPTIONS : approves
+    USERS o|--o{ AUDIT_LOGS : acts_in
+    USERS {
+      int id PK
+      string username UK
+      string password_hash
+      string role
+      bool is_active
+      datetime created_at
+    }
+    SUBSCRIPTIONS {
+      int id PK
+      string name
+      string subscription_id UK
+      bool is_active
+      datetime created_at
+    }
+    POLICY_RULES {
+      int id PK
+      string code UK
+      string name
+      string resource_type
+      string severity
+      json config
+      bool enabled
+    }
+    SCANS {
+      int id PK
+      string subscription_id
+      int triggered_by_user_id FK
+      string status
+      datetime started_at
+      datetime completed_at
+    }
+    FINDINGS {
+      int id PK
+      int scan_id FK
+      string policy_code
+      string resource_id
+      string resource_name
+      string severity
+      string status
+      json details
+    }
+    REMEDIATION_ACTIONS {
+      int id PK
+      int finding_id FK
+      int requested_by_user_id FK
+      int approved_by_user_id FK
+      string action_type
+      string status
+      json input_data
+    }
+    EXCEPTIONS {
+      int id PK
+      int finding_id FK
+      int approved_by_user_id FK
+      string reason
+      datetime expires_at
+    }
+    AUDIT_LOGS {
+      int id PK
+      int actor_user_id FK nullable
+      string action
+      string entity_type
+      string entity_id
+      string previous_hash
+      string entry_hash
+    }
 ```
 
-On Linux, use `python3 -m venv .venv` and `source .venv/bin/activate`.
+**Important schema nuance:** `subscriptions.subscription_id` and `scans.subscription_id` are string values, not a declared foreign key. `findings.policy_code` is also stored as a string and is not a declared foreign key to `policy_rules.code`. The `exceptions` table is created by the model, but the current API routes in this phase do not expose exception-management endpoints.
 
-## 4. One-click DB/table initialization and start API
+### Table-by-table explanation
 
-There is no separate table-creation command. Starting the API creates missing tables and seeds the initial users and policies automatically:
+| Table | Why it exists | Important fields |
+|---|---|---|
+| `users` | CloudGuard users and their roles | `username`, `password_hash`, `role`, `is_active` |
+| `subscriptions` | Azure subscriptions that an Admin has registered for scanning | `name`, `subscription_id`, `is_active` |
+| `policy_rules` | Policy definitions and their settings | `code`, `severity`, JSON `config`, `enabled` |
+| `scans` | One record for each scan attempt | `subscription_id`, `triggered_by_user_id`, `status`, timestamps, error |
+| `findings` | Compliance issues discovered by scans | `scan_id`, `policy_code`, resource identity, severity, status, JSON details |
+| `remediation_actions` | Records of attempted/completed/failed changes | `finding_id`, requester/approver IDs, action type, status, inputs/result |
+| `exceptions` | Data model for approved exceptions with reason and expiry | `finding_id`, `approved_by_user_id`, `reason`, `expires_at` |
+| `audit_logs` | Records security-relevant actions with a hash link to the prior entry | actor, action, entity, details, previous/current hashes |
 
-```powershell
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+## 6. Policies and their flow
+
+### Low risk — VM tag
+
+```mermaid
+flowchart TD
+    A[Start scan] --> B[List VMs in subscription]
+    B --> C{Environment tag exists?}
+    C -- Yes --> D[No finding for this VM]
+    C -- No --> E[Create LOW finding]
+    E --> F[Create remediation action]
+    F --> G[Merge Environment=dev tag through Azure SDK]
+    G --> H{Azure operation succeeded?}
+    H -- Yes --> I[Action SUCCEEDED; finding RESOLVED; audit entry]
+    H -- No --> J[Action FAILED; finding OPEN; audit entry]
 ```
 
-Open <http://127.0.0.1:8000/docs>.
+### High risk — NSG inbound rule
 
-If the database connection fails, verify that `DATABASE_URL` credentials match `POSTGRES_PASSWORD` and that the container is healthy.
-
-## 5. Development-only offline test (no Azure calls)
-
-For laptop-only API / mock-scan testing, set this in `.env`:
-
-```dotenv
-CLOUDGUARD_AZURE_MOCK=true
+```mermaid
+flowchart TD
+    A[Start scan] --> B[List NSGs and security rules]
+    B --> C{Allow + Inbound + IPv4 /0 source?}
+    C -- No --> D[No finding for that rule]
+    C -- Yes --> E[Create HIGH finding: PENDING_APPROVAL]
+    E --> F[Security Officer or Admin reviews pending approvals]
+    F --> G[Submit restricted replacement IPv4 CIDR]
+    G --> H{CIDR valid and prefix length greater than 0?}
+    H -- No --> I[Reject request]
+    H -- Yes --> J[Update NSG rule through Azure SDK]
+    J --> K{Azure operation succeeded?}
+    K -- Yes --> L[Action SUCCEEDED; finding RESOLVED; audit entry]
+    K -- No --> M[Action FAILED; finding remains PENDING_APPROVAL; audit entry]
 ```
 
-Keep a valid-looking `AZURE_SUBSCRIPTION_ID` value. Restart Uvicorn after changing `.env`. In mock mode, the scan returns two sample VMs and one sample NSG finding; it does not change Azure. Register that subscription in Swagger before scanning.
+The approval endpoint performs both the approval record and the Azure remediation. It rejects `0.0.0.0/0` as a replacement, but it cannot determine your correct corporate/VPN CIDR. Supply only a CIDR approved by your organization. Test live changes only against a safe non-production rule.
 
-## 6. Provision a UAMI for live Azure access
+## 7. API reference
 
-Run from an account allowed to create identities and assign roles. Replace the placeholders:
+All routes below are prefixed with `/api/v1`. Protected routes require `Authorization: Bearer <CloudGuard-JWT>` unless noted.
 
-```powershell
-az login
-az account set --subscription "<SUBSCRIPTION_ID>"
-az identity create --resource-group "<IDENTITY_RESOURCE_GROUP>" --name "uami-cloudguard"
-az identity show --resource-group "<IDENTITY_RESOURCE_GROUP>" --name "uami-cloudguard" --query "{clientId:clientId,principalId:principalId,id:id}" -o json
+| Method | Endpoint | Purpose | Access |
+|---|---|---|---|
+| `GET` | `/health` | Health response | Public |
+| `POST` | `/auth/login` | Verify username/password and issue JWT | Public |
+| `GET` | `/subscriptions` | List registered subscriptions | Any authenticated user |
+| `POST` | `/subscriptions` | Register a subscription | `ADMIN` |
+| `GET` | `/policies` | List policy definitions | Any authenticated user |
+| `PATCH` | `/policies/{policy_id}/enabled?enabled=true` | Enable/disable policy | `ADMIN` |
+| `POST` | `/scans` | Start scan for a registered active subscription | Any authenticated user |
+| `GET` | `/scans/{scan_id}` | Get scan status/details | Any authenticated user |
+| `GET` | `/findings` | List findings; optional `status` and `severity` filters | Any authenticated user |
+| `GET` | `/approvals/pending` | List findings awaiting approval | `SECURITY_OFFICER`, `ADMIN` |
+| `POST` | `/approvals/findings/{finding_id}/approve` | Approve and execute NSG source restriction | `SECURITY_OFFICER`, `ADMIN` |
+| `GET` | `/audit-logs?limit=100` | Read audit log, maximum 500 rows | `ADMIN` |
+
+### Typical request shapes
+
+Login:
+
+```json
+{
+  "username": "admin",
+  "password": "<password configured for this seeded account>"
+}
 ```
 
-Record:
-- `clientId` -> `AZURE_CLIENT_ID`
-- `principalId` -> RBAC role assignment / identity attachment
-- `id` -> resource ID for attaching the identity to the Azure VM
+Register a subscription:
 
-### Attach the UAMI to the Azure VM running CloudGuard
-
-```powershell
-az vm identity assign --resource-group "<APP_VM_RESOURCE_GROUP>" --name "<APP_VM_NAME>" --identities "<UAMI_RESOURCE_ID>"
+```json
+{
+  "name": "Development Subscription",
+  "subscription_id": "<Azure subscription GUID>"
+}
 ```
 
-The Python app must run on this Azure VM for UAMI authentication. It cannot use the VM's UAMI from a separate Windows laptop.
+Start a scan:
 
-### Grant least-privilege RBAC
-
-For read-only scanning, Reader at the target subscription scope is the simplest starting point:
-
-```powershell
-az role assignment create --assignee-object-id "<UAMI_PRINCIPAL_ID>" --assignee-principal-type ServicePrincipal --role "Reader" --scope "/subscriptions/<SUBSCRIPTION_ID>"
+```json
+{
+  "subscription_id": "<registered Azure subscription GUID>"
+}
 ```
 
-For VM tag remediation, grant the required tag-write permission at the narrowest applicable scope, for example the target VM or resource group. For approved NSG changes, grant `Network Contributor` only at the target NSG or its resource group scope. Do not grant write permissions at subscription scope unless specifically justified and approved by your organization.
+Approve NSG remediation:
 
-Example role assignment commands (choose the correct target scope):
-```powershell
-az role assignment create --assignee-object-id "<UAMI_PRINCIPAL_ID>" --assignee-principal-type ServicePrincipal --role "Tag Contributor" --scope "<TARGET_VM_RESOURCE_ID>"
-az role assignment create --assignee-object-id "<UAMI_PRINCIPAL_ID>" --assignee-principal-type ServicePrincipal --role "Network Contributor" --scope "<TARGET_NSG_RESOURCE_ID>"
+```json
+{
+  "replacement_source_cidr": "<organization-approved restricted IPv4 CIDR>"
+}
 ```
 
-Your account needs permission to create these role assignments. Allow time for RBAC propagation. Validate exact role availability and scope requirements in your Azure environment before applying write permissions.
+## 8. Authentication and authorization
 
-## 7. Access Swagger locally while the app runs on an Azure VM
+- Passwords are stored as password hashes (Argon2 through `pwdlib`), not plaintext.
+- Login returns a signed JWT. The token includes user ID (`sub`), username, role, issue time and expiry.
+- Swagger sends the token as a bearer token for protected routes.
+- `get_current_user()` decodes the token and reloads the user from PostgreSQL; inactive or unknown users are rejected.
+- `require_roles()` adds role checks. Roles seeded by default: `ADMIN`, `CLOUD_ENGINEER`, `SECURITY_OFFICER`.
+- Seed credentials come from `.env`/settings. They are development credentials; change them before use beyond a disposable test environment.
 
-For safer testing, bind Uvicorn to loopback on the Azure VM:
+## 9. Azure authentication and permissions
 
-```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
+The current `azure_service.py` uses **`AzureCliCredential`**. Run `az login`, select the correct subscription, and make sure the logged-in identity has appropriate Azure RBAC permissions. This is not UAMI authentication.
 
-From your local machine, establish an SSH tunnel (replace username and VM public IP/DNS):
+Expected permission categories:
+- Scan: read VMs, VM tags, NSGs and security rules in the target subscription.
+- Low-risk remediation: permission to update tags at the target VM/resource scope.
+- High-risk remediation: permission to update NSG security rules at the target NSG/resource-group scope.
 
-```powershell
-ssh -L 8000:127.0.0.1:8000 <VM_USERNAME>@<VM_PUBLIC_IP_OR_DNS>
-```
+Use least privilege and scope write permissions narrowly. CloudGuard's own roles govern who can call CloudGuard endpoints; Azure RBAC governs what the Azure identity can actually change.
 
-Keep the SSH session open, then browse to <http://127.0.0.1:8000/docs> on your laptop. Ensure SSH access is appropriately restricted by your organization. Do not expose the API publicly for this initial test.
+## 10. Configuration variables
 
-## 8. Test in Swagger
+| Variable | Meaning |
+|---|---|
+| `APP_NAME` | FastAPI title |
+| `APP_ENV` | Environment label |
+| `API_PREFIX` | API prefix; defaults to `/api/v1` |
+| `DATABASE_URL` | SQLAlchemy PostgreSQL connection string |
+| `JWT_SECRET_KEY` | Secret used to sign CloudGuard JWTs; replace default |
+| `JWT_EXPIRE_MINUTES` | JWT lifetime |
+| `AZURE_SUBSCRIPTION_ID` | Intended subscription setting; subscription IDs are also supplied to API operations |
+| `CLOUDGUARD_AZURE_MOCK` | `true` uses sample Azure objects; `false` calls Azure |
+| `SEED_ADMIN_USERNAME`, `SEED_ADMIN_PASSWORD` | Initial Admin account if missing |
+| `SEED_ENGINEER_USERNAME`, `SEED_ENGINEER_PASSWORD` | Initial Engineer account if missing |
+| `SEED_SECURITY_USERNAME`, `SEED_SECURITY_PASSWORD` | Initial Security Officer account if missing |
 
-1. `POST /api/v1/auth/login` with one of the seeded users, e.g. `admin` and the password from `.env`.
-2. Copy `access_token` from the response.
-3. Click **Authorize** in Swagger and enter `Bearer <access_token>` if the UI asks for the full header value.
-4. As Admin, `POST /api/v1/subscriptions` with `name` and `subscription_id`.
-5. `GET /api/v1/policies` to see the two seeded policies.
-6. `POST /api/v1/scans` with the registered `subscription_id`.
-7. `GET /api/v1/findings` to review findings.
-8. Log in as `security` and authorize with that token.
-9. `GET /api/v1/approvals/pending`.
-10. Approve an NSG finding with `POST /api/v1/approvals/findings/{finding_id}/approve`, body such as `{"replacement_source_cidr":"203.0.113.10/32"}`. This CIDR is documentation-only and should **not** be used as a real allowlist; use your approved corporate/VPN IP range for real remediation.
-11. Log in as `admin` and call `GET /api/v1/audit-logs`.
+`AZURE_CLIENT_ID` may remain in the template from an earlier UAMI configuration, but the current Azure service code does not use it.
 
-The approve endpoint both records approval and executes the NSG source change. It rejects `0.0.0.0/0` as a replacement. Do not test live remediation against production resources.
+## 11. Tests and current boundaries
 
-## 9. Unit tests
-
-```powershell
-pytest
-```
-
-The tests cover policy evaluation and password/JWT helpers. Azure calls are not made by these unit tests.
-
-## Seed accounts (development only)
-
-- `admin` — role `ADMIN`
-- `engineer` — role `CLOUD_ENGINEER`
-- `security` — role `SECURITY_OFFICER`
-
-Passwords are set by `SEED_*_PASSWORD` in `.env`. The accounts are created automatically if missing; changing a seed password after the account already exists does not reset that existing account's password.
-
-## Notes and boundaries
-
-- This is a practical Phase 1 scaffold, not a production-hardened compliance product.
-- NSG scan currently examines NSGs in the registered subscription, not only NSGs attached to VM NICs.
-- Detection is based on enabled inbound `Allow` rules with a source IPv4 prefix of `/0`, including `0.0.0.0/0`.
-- The NSG remediation requires the officer to provide a restricted replacement IPv4 CIDR. CloudGuard cannot safely guess which corporate IP range should be allowed.
-- Email notifications, scheduling, additional resource types, application containerization, Kubernetes, and CI/CD are deferred.
-- The hash-linked audit entries are tamper-evident within the database chain but are not immutable against a database administrator rewriting the whole chain. Production needs protected/externally anchored audit storage.
+- Run `pytest` for the current unit tests.
+- Unit tests cover policy predicates and password/JWT helpers; they do not validate live Azure permissions or real remediation.
+- Current scan enumerates NSGs in the registered subscription; it does not restrict the scan to NSGs attached to VM NICs.
+- `Base.metadata.create_all()` creates missing tables but is not a schema migration framework.
+- Audit entries are hash-linked for tamper evidence, but the database administrator could rewrite the whole chain. Production should anchor/protect logs externally.
+- Scheduled scans, email notifications, more resource types, Kubernetes, and CI/CD are outside this Phase 1 implementation.
